@@ -2042,15 +2042,15 @@ async function playAct2() {
   await playSegment("seg8", [
     { who: "Mimi", text: "Oh no! The parrot mixed up ALL the name cards! Mr Smith can't read them!", audio: "mimi-chaos", delay: 4250 }
   ]);
-  await speakOver("seg8", "Mimi", "Name Battle! Peter and Lulu are the referees. Say the right names — save the cards!", "mimi-defend", 3.0, 6.0);
+  await speakOver("seg8", "Mimi", "Name Battle! Peter and Lulu are the referees. Say the right names — save the cards!", "mimi-defend", 4.2, 6.0);
 
   /* 3 · 保卫 Peter 的全名（Banana Peter 梗） */
-  await speakOver("seg8", "Mimi", "This card is Peter's! The parrot says his name is... Banana Peter?! NO! His family name is Wang. Say his FULL name!", "mimi-fullname-ask", 3.0, 6.0);
+  await speakOver("seg8", "Mimi", "This card is Peter's! The parrot says his name is... Banana Peter?! NO! His family name is Wang. Say his FULL name!", "mimi-fullname-ask", 4.2, 6.0);
   await childTurn("fullname");
 
   /* 4 · 保卫孩子自己的名字（Pizza 梗） */
   playSfx("squawk");
-  await speakOver("seg8", "Mimi", "Now the parrot has YOUR card! It says your name is... Pizza?! Is that you? Tell Mr Smith: That's me!", "mimi-thatme-ask", 3.0, 6.0);
+  await speakOver("seg8", "Mimi", "Now the parrot has YOUR card! It says your name is... Pizza?! Is that you? Tell Mr Smith: That's me!", "mimi-thatme-ask", 4.2, 6.0);
   await childTurn("thatme");
 
   /* 5 · 双胞胎词卡（错词进封印本） */
@@ -2069,16 +2069,16 @@ async function playAct2() {
   await childTurn("guitar");
 
   /* 7 · 最后两张词卡：网球 + 爱好 */
-  await speakOver("seg8", "Mimi", "One more card! Lulu's favourite sport — she is holding a racket! What is it?", "mimi-tennis-ask", 3.0, 6.0);
+  await speakOver("seg8", "Mimi", "One more card! Lulu's favourite sport — she is holding a racket! What is it?", "mimi-tennis-ask", 4.2, 6.0);
   await childTurn("tennis");
-  await speakOver("seg8", "Mimi", "Last card! The card asks: What do you like doing? That is your...?", "mimi-hobby-ask", 3.0, 6.0);
+  await speakOver("seg8", "Mimi", "Last card! The card asks: What do you like doing? That is your...?", "mimi-hobby-ask", 4.2, 6.0);
   await childTurn("hobby");
 
   /* 8 · Mr Smith 盖章认证 + 第 2 枚贴纸 */
   await playSegment("seg11", [
-    { who: "Mr Smith", text: "Wonderful! Every name is safe. You are a Name Hero!", audio: "smith-stamp-line", delay: 2000 }
+    { who: "Mr Smith", text: "Wonderful! Every name is safe. You are a Name Hero!", audio: "smith-stamp-line", delay: 3200 }
   ]);
-  await speakOver("seg11", "Mimi", "You did it! You saved ALL the names!", "mimi-act2-end", 2.5, 6.0);
+  await speakOver("seg11", "Mimi", "You did it! You saved ALL the names!", "mimi-act2-end", 4.2, 6.0);
   await awardSticker2();
   confetti();
   pop("名字保卫战胜利 🛡️");
