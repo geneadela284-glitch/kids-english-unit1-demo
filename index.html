@@ -36,7 +36,7 @@
   }
   .slot {
     flex:1; background:#fff; border:2px dashed #d9cba6; border-radius:10px;
-    padding:5px 4px; text-align:center; transition:all .4s;
+    padding:5px 4px; text-align:center; transition:border-color .4s, background-color .4s, box-shadow .4s;
   }
   .slot .k { font-size:10px; color:#a08c5f; }
   .slot .v { font-size:12px; font-weight:700; color:#c9b98f; min-height:16px; }
@@ -47,15 +47,16 @@
   .stage { position:relative; flex:1; background:#000; overflow:hidden; }
   .stage video {
     position:absolute; inset:0; width:100%; height:100%;
-    object-fit:cover; opacity:0; transition:opacity .25s; z-index:1;
+    object-fit:cover; opacity:0; z-index:1; visibility:hidden;
+    transition:opacity .18s ease, visibility 0s linear .18s;
     pointer-events:none;
   }
-  .stage video.on { opacity:1; z-index:2; }
-  /* 定格呼吸运镜：暂停帧极缓慢推近，定格看起来是活的 */
-  .stage video.breathe { animation:breathe 9s ease-in-out infinite alternate; }
+  .stage video.on { opacity:1; z-index:2; visibility:visible; transition:opacity .18s ease; }
+  /* 定格呼吸运镜：暂停帧极缓慢推近，定格看起来是活的（幅度/频率已压到最低，只在定格等待时开） */
+  .stage video.breathe { animation:breathe 14s ease-in-out infinite alternate; will-change:transform; }
   @keyframes breathe {
-    from { transform:scale(1.015) translate(0,0); }
-    to   { transform:scale(1.065) translate(-0.8%,-1.2%); }
+    from { transform:scale(1.01) translate(0,0); }
+    to   { transform:scale(1.032) translate(-0.3%,-0.5%); }
   }
   .stage.bounce { animation:stageBounce .55s ease; }
   @keyframes stageBounce { 0%{transform:scale(1);} 30%{transform:scale(1.025);} 55%{transform:scale(.995);} 100%{transform:scale(1);} }
@@ -132,12 +133,13 @@
   .mic {
     width:64px; height:64px; border-radius:50%; border:none; flex:none;
     background:#ffb52e; font-size:28px; cursor:pointer;
-    box-shadow:0 4px 0 #d18f12, 0 8px 18px rgba(0,0,0,.25);
+    box-shadow:0 4px 0 #d18f12, 0 0 0 5px rgba(255,181,46,.35), 0 8px 18px rgba(0,0,0,.25);
     animation:micIdle 2.6s ease-in-out infinite;
   }
+  /* 待机呼吸改走 transform（合成层动画）：旧版无限动画 box-shadow 每帧重绘，真机上是隐形负担 */
   @keyframes micIdle {
-    0%,100% { box-shadow:0 4px 0 #d18f12, 0 0 0 0 rgba(255,181,46,.45), 0 8px 18px rgba(0,0,0,.25); }
-    50%     { box-shadow:0 4px 0 #d18f12, 0 0 0 10px rgba(255,181,46,0), 0 8px 18px rgba(0,0,0,.25); }
+    0%,100% { transform:scale(1); }
+    50%     { transform:scale(1.045); }
   }
   .mic:active { transform:translateY(2px); box-shadow:0 2px 0 #d18f12; }
   .mic.listening { background:#ff6b5e; animation:pulse 1s infinite; }
@@ -189,6 +191,12 @@
   .loadbar { height:10px; background:rgba(255,255,255,.22); border-radius:99px; overflow:hidden; }
   .loadbar i { display:block; height:100%; width:0%; background:linear-gradient(90deg,#1e9e75,#ffb52e); border-radius:99px; transition:width .25s; }
   .loadtxt { font-size:12px; color:#e8e2cd; margin-top:7px; min-height:16px; }
+  .loadfail {
+    margin-top:12px; max-width:320px; background:rgba(90,20,10,.55);
+    border:1.5px solid rgba(255,150,120,.6); border-radius:12px; padding:9px 12px;
+    font-size:12px; color:#ffe3d9; text-align:left;
+  }
+  .loadfail .lf-list { font-size:11px; opacity:.85; margin:4px 0 8px; word-break:break-all; max-height:64px; overflow-y:auto; }
   .hidden { display:none !important; }
   .confetti { position:absolute; inset:0; z-index:8; pointer-events:none; overflow:hidden; }
   .confetti i {
@@ -422,6 +430,11 @@
         <div class="loadbar"><i id="loadFill"></i></div>
         <div class="loadtxt" id="loadTxt">正在把动画装进口袋…</div>
       </div>
+      <div class="loadfail hidden" id="loadFail">
+        <div class="lf-title">这几个小文件没装好（不影响先玩，会自动用在线版顶上）：</div>
+        <div class="lf-list" id="loadFailList"></div>
+        <button class="btn go" id="loadRetryBtn">↻ 重新装这几个</button>
+      </div>
     </div>
 
     <div class="veil hidden" id="endVeil">
@@ -440,6 +453,21 @@
       <button class="big alt" id="backToAct1Btn">↩ 回第一幕</button>
       <button class="big alt" id="act2GameBtn">🎮 再玩听音抢答</button>
       <p style="margin-top:14px;font-size:12px;color:#bdb493;">下一集预告：把朋友介绍给 Mr Smith 老师（第三幕）</p>
+    </div>
+
+    <div class="veil hidden" id="act2LoadVeil" style="z-index:30;">
+      <h1>🎬 第二幕马上开始</h1>
+      <p>教室还在布置中——等动画都到齐就开演，马上就好。</p>
+      <div class="loadwrap">
+        <div class="loadbar"><i id="act2Fill"></i></div>
+        <div class="loadtxt" id="act2LoadTxt">正在准备第二幕…</div>
+      </div>
+      <div class="loadfail hidden" id="act2Fail">
+        <div class="lf-title">这几个小文件没装好：</div>
+        <div class="lf-list" id="act2FailList"></div>
+        <button class="btn go" id="act2RetryBtn">↻ 重新装这几个</button>
+      </div>
+      <button class="big alt" id="act2CancelBtn">先回第一幕</button>
     </div>
   </div>
 </div>
@@ -500,7 +528,8 @@ let activeVid = null;
 for (const k in SEGFILES) {
   const v = document.createElement("video");
   v.muted = true; v.setAttribute("muted", ""); v.setAttribute("playsinline", "");
-  v.preload = "auto";
+  /* 只让第一段（首屏活背景）预载，其余按需加载：避免 11 路视频同时预解码压垮手机 */
+  v.preload = (k === "seg1") ? "auto" : "none";
   $("pool").appendChild(v);
   vids[k] = v;
 }
@@ -508,9 +537,11 @@ function showSeg(key) {
   const v = vids[key];
   if (activeVid === v) return v;
   const old = activeVid;
+  if (v.readyState === 0 && v.src) { try { v.load(); } catch (e) {} }
   v.classList.add("on");
   activeVid = v;
-  if (old) setTimeout(() => { old.classList.remove("on"); old.pause(); old.classList.remove("breathe"); }, 280);
+  /* 淡变 180ms 一到就停掉旧的一路并移出合成树：两路同时解码+合成的窗口压到最短 */
+  if (old) setTimeout(() => { old.classList.remove("on"); old.pause(); old.classList.remove("breathe"); }, 190);
   return v;
 }
 /* 首屏：第一段停在开头当活背景（带呼吸运镜，不是一张死图） */
@@ -637,109 +668,225 @@ function playSfx(name) {
   } catch (e) {}
 }
 
-/* ---------- 整段下载：带进度，全部到齐才开演（失败三次退回直连地址） ---------- */
-async function fetchAsBlobURL(url, onChunk) {
+/* ---------- 分幕加载：第一幕先装好就能玩，第二幕在后台悄悄装 ----------
+   每个文件：流式下载＋15 秒无进度判死＋自动重试；最终失败会列名＋可重试，
+   视频退回直连地址兜底，绝不无限转圈假死。进度＝文件数＋真实字节双口径。 */
+const ACT1_SEGS = ["seg1", "seg2", "seg3", "seg4", "seg5", "seg6"];
+const ACT2_SEGS = ["seg7", "seg8", "seg9", "seg10", "seg11"];
+const ACT2_AUDIO_FROM = AUDIO_FILES.indexOf("smith-morning");
+const ACT1_AUDIO = ACT2_AUDIO_FROM > 0 ? AUDIO_FILES.slice(0, ACT2_AUDIO_FROM) : AUDIO_FILES.slice();
+const ACT2_AUDIO = ACT2_AUDIO_FROM > 0 ? AUDIO_FILES.slice(ACT2_AUDIO_FROM) : [];
+/* 第二幕片段是否全部就位（Blob 或直连兜底都算有源） */
+const segLoaded = {};
+let act2Ready = false;
+
+async function fetchBlob(url, onChunk, onLen) {
+  const ctrl = new AbortController();
+  const headTimer = setTimeout(() => { try { ctrl.abort(); } catch (e) {} }, 15000);
+  let r;
+  try { r = await fetch(url, { signal: ctrl.signal }); }
+  finally { clearTimeout(headTimer); }
+  if (!r.ok) throw new Error("http " + r.status);
+  const mime = r.headers.get("Content-Type") || "";
+  const len = +r.headers.get("Content-Length") || 0;
+  if (onLen && len) onLen(len);
+  if (r.body && r.body.getReader) {
+    const reader = r.body.getReader();
+    const chunks = [];
+    let got = 0;
+    for (;;) {
+      let timer = null;
+      const stall = new Promise((_, rej) => { timer = setTimeout(() => rej(new Error("stall 15s")), 15000); });
+      let d;
+      try { d = await Promise.race([reader.read(), stall]); }
+      catch (e) { try { reader.cancel(); } catch (e2) {} throw e; }
+      finally { clearTimeout(timer); }
+      if (d.done) break;
+      chunks.push(d.value); got += d.value.length;
+      if (onChunk) onChunk(got);
+    }
+    return new Blob(chunks, { type: mime });
+  }
+  /* 无流式读取能力时退回整体下载（30 秒总超时兜底） */
+  const t = setTimeout(() => { try { ctrl.abort(); } catch (e) {} }, 30000);
+  try {
+    const buf = await r.arrayBuffer();
+    if (onChunk) onChunk(buf.byteLength);
+    return new Blob([buf], { type: mime });
+  } finally { clearTimeout(t); }
+}
+async function fetchAsBlobURL(url, onChunk, onLen) {
   let lastErr = null;
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      const r = await fetch(url);
-      if (!r.ok) throw new Error("http " + r.status);
-      const mime = r.headers.get("Content-Type") || "";
-      if (r.body && r.body.getReader) {
-        const reader = r.body.getReader();
-        const chunks = [];
-        let got = 0;
-        while (true) {
-          const d = await reader.read();
-          if (d.done) break;
-          chunks.push(d.value); got += d.value.length;
-          if (onChunk) onChunk(got);
-        }
-        return URL.createObjectURL(new Blob(chunks, { type: mime }));
-      }
-      const buf = await r.arrayBuffer();
-      if (onChunk) onChunk(buf.byteLength);
-      return URL.createObjectURL(new Blob([buf], { type: mime }));
-    } catch (e) { lastErr = e; await sleep(600); }
+      const blob = await fetchBlob(url, onChunk, onLen);
+      return URL.createObjectURL(blob);
+    } catch (e) {
+      lastErr = e;
+      if (onChunk) onChunk(0);
+      await sleep(600 * (attempt + 1));
+    }
   }
   throw lastErr;
 }
-const loadState = { bytes: 0, totalBytes: 0, filesDone: 0, filesTotal: 0 };
-/* 第二幕片段是否全部就位：就位才亮第二幕入口（片段缺失时入口自动隐藏，第一幕不受影响） */
-const segLoaded = {};
-let act2Ready = false;
-function renderLoadProgress() {
-  let pct;
-  if (loadState.totalBytes > 0) pct = Math.min(100, Math.round(loadState.bytes / loadState.totalBytes * 100));
-  else pct = loadState.filesTotal ? Math.round(loadState.filesDone / loadState.filesTotal * 100) : 0;
-  const fill = $("loadFill"), txt = $("loadTxt");
-  if (fill) fill.style.width = pct + "%";
-  if (txt && !assetsReady) txt.textContent = "正在把动画装进口袋… " + pct + "%";
+
+/* 一「幕」的加载状态：进度、失败名单、settle 承诺 */
+function makePhase(name, jobs) {
+  let resolveFn = null;
+  const promise = new Promise(r => { resolveFn = r; });
+  return {
+    name: name, jobs: jobs, promise: promise, resolve: resolveFn,
+    done: 0, bytesGot: 0, bytesTotal: 0, pctShown: 0, settled: false, lastRender: 0,
+    failed: function () { return this.jobs.filter(j => j.state === "fail"); }
+  };
 }
-async function loadAllAssets() {
-  const jobs = [];
-  for (const k in SEGFILES) jobs.push({ key: "clips/" + k, url: "clips/" + SEGFILES[k], seg: k });
-  AUDIO_FILES.forEach(f => jobs.push({ key: "audio/" + f, url: A(f) }));
-  SFX_FILES.forEach(n => jobs.push({ key: "sfx/" + n, url: "sfx/" + n + ".mp3" }));
-  loadState.filesTotal = jobs.length;
-  await Promise.all(jobs.map(async j => {
-    try {
-      const h = await fetch(j.url, { method: "HEAD" });
-      j.len = +h.headers.get("Content-Length") || 0;
-      loadState.totalBytes += j.len;
-    } catch (e) { j.len = 0; }
-  }));
-  renderLoadProgress();
-  const queue = jobs.slice();
+function renderFailBox(ph, boxId, listId) {
+  const box = $(boxId), list = $(listId);
+  if (!box || !list) return;
+  const failed = ph.failed();
+  if (!failed.length) { box.classList.add("hidden"); return; }
+  list.textContent = failed.map(j => j.url.split("/").pop()).join("、");
+  box.classList.remove("hidden");
+}
+function phaseRender(ph) {
+  const now = performance.now();
+  if (!ph.settled && now - ph.lastRender < 120) return;
+  ph.lastRender = now;
+  let pct = ph.jobs.length ? Math.round(ph.done / ph.jobs.length * 100) : 100;
+  if (ph.bytesTotal > 0) pct = Math.max(pct, Math.min(100, Math.round(ph.bytesGot / ph.bytesTotal * 100)));
+  ph.pctShown = Math.max(ph.pctShown, pct);
+  const mb = b => (b / 1048576).toFixed(1);
+  if (ph.name === "act1") {
+    const fill = $("loadFill"), txt = $("loadTxt");
+    if (fill) fill.style.width = ph.pctShown + "%";
+    if (txt && !assetsReady) txt.textContent = "正在把动画装进口袋… " + ph.done + "/" + ph.jobs.length + " 个 · " + mb(ph.bytesGot) + "MB";
+    renderFailBox(ph, "loadFail", "loadFailList");
+  } else {
+    const fill = $("act2Fill"), txt = $("act2LoadTxt");
+    if (fill) fill.style.width = ph.pctShown + "%";
+    if (txt && !act2Primed) txt.textContent = "正在准备第二幕… " + ph.done + "/" + ph.jobs.length + " 个 · " + mb(ph.bytesGot) + "MB";
+    renderFailBox(ph, "act2Fail", "act2FailList");
+  }
+}
+async function runPhaseJobs(ph, concurrency) {
+  const queue = ph.jobs.filter(j => j.state !== "ok");
   async function worker() {
     while (queue.length) {
       const j = queue.shift();
-      let counted = 0;
+      if (j.state === "ok") continue;
+      j.state = "run";
+      ph.bytesGot -= j.got; j.got = 0;
       try {
-        const u = await fetchAsBlobURL(j.url, got => { loadState.bytes += (got - counted); counted = got; renderLoadProgress(); });
+        const u = await fetchAsBlobURL(j.url,
+          got => { ph.bytesGot += (got - j.got); j.got = got; phaseRender(ph); },
+          len => { if (!j.len) { j.len = len; ph.bytesTotal += len; } });
         blobURLs[j.key] = u;
         if (j.seg) { vids[j.seg].src = u; segLoaded[j.seg] = true; }
+        j.state = "ok";
       } catch (e) {
-        if (j.seg) vids[j.seg].src = j.url; /* 退回直连，至少能播 */
+        j.state = "fail";
+        if (j.seg) { try { vids[j.seg].src = j.url; } catch (e2) {} } /* 退回直连，至少能播 */
       }
-      loadState.filesDone++;
-      renderLoadProgress();
+      ph.done = ph.jobs.filter(x => x.state === "ok" || x.state === "fail").length;
+      phaseRender(ph);
     }
   }
-  await Promise.all([worker(), worker(), worker(), worker()]);
-  AUDIO_FILES.forEach(f => { try { getAudio(f).load(); } catch (e) {} });
+  const ws = [];
+  for (let i = 0; i < concurrency; i++) ws.push(worker());
+  await Promise.all(ws);
+  ph.done = ph.jobs.length;
+  ph.settled = true;
+  phaseRender(ph);
+  ph.resolve();
+}
+function buildJobs(segs, audios, withSfx) {
+  const jobs = [];
+  segs.forEach(k => jobs.push({ key: "clips/" + k, url: "clips/" + SEGFILES[k], seg: k, state: "wait", got: 0, len: 0 }));
+  audios.forEach(f => jobs.push({ key: "audio/" + f, url: A(f), state: "wait", got: 0, len: 0 }));
+  if (withSfx) SFX_FILES.forEach(n => jobs.push({ key: "sfx/" + n, url: "sfx/" + n + ".mp3", state: "wait", got: 0, len: 0 }));
+  return jobs;
+}
+const phase1 = makePhase("act1", buildJobs(ACT1_SEGS, ACT1_AUDIO, true));
+const phase2 = makePhase("act2", buildJobs(ACT2_SEGS, ACT2_AUDIO, false));
+function createPhaseAudios(files) {
+  files.forEach(f => { if (blobURLs["audio/" + f]) { try { getAudio(f).load(); } catch (e) {} } });
+}
+function markAct2Ready() {
+  act2Ready = ACT2_SEGS.every(k => !!vids[k].src);
+  window.__act2Ready = act2Ready;
+}
+async function startLoading() {
+  await runPhaseJobs(phase1, 4);
+  createPhaseAudios(ACT1_AUDIO);
   ensureSfx();
   assetsReady = true;
   const btn = $("startBtn");
   btn.disabled = false;
   btn.textContent = "开始上课";
-  $("loadTxt").textContent = "装好啦，点「开始上课」！";
-  act2Ready = ["seg7", "seg8", "seg9", "seg10", "seg11"].every(k => segLoaded[k]);
-  window.__act2Ready = act2Ready;
-  if (act2Ready) {
-    $("act2Btn").classList.remove("hidden");
-    $("bookAct2Btn").classList.remove("hidden");
-    if (save.sticker1) $("act2DirectBtn").classList.remove("hidden");
+  $("loadTxt").textContent = phase1.failed().length ? "大部分装好啦，可以先开始上课！" : "装好啦，点「开始上课」！";
+  $("bookAct2Btn").classList.remove("hidden");
+  if (save.sticker1) $("act2DirectBtn").classList.remove("hidden");
+  /* 第二幕在后台继续装——第一幕玩着的时候就装齐了，进第二幕不用再等 */
+  runPhaseJobs(phase2, 3).then(() => {
+    createPhaseAudios(ACT2_AUDIO);
+    markAct2Ready();
+  });
+}
+$("loadRetryBtn").onclick = async () => {
+  await runPhaseJobs(phase1, 4);
+  createPhaseAudios(ACT1_AUDIO);
+  phaseRender(phase1);
+  if (!phase1.failed().length) $("loadTxt").textContent = "装好啦，点「开始上课」！";
+};
+$("act2RetryBtn").onclick = async () => {
+  await runPhaseJobs(phase2, 3);
+  createPhaseAudios(ACT2_AUDIO);
+  markAct2Ready();
+  if (act2Ready && !$("act2LoadVeil").classList.contains("hidden")) {
+    $("act2LoadVeil").classList.add("hidden");
+    playAct2();
+  }
+};
+/* 点按手势里把解码器唤醒：消除真机上每句配音首次播放的启动延迟。
+   改成分批＋逐个点火：旧版在一次点击里同时点火全部音频和 10 路视频，
+   真机上几十路解码器集体抢占，是全程顿挫的源头之一。现在音频每批 6 个、
+   视频逐个点火，同一时刻最多多占一路视频解码器。 */
+async function primeAudios(files) {
+  const list = files.map(f => AC[f]).filter(Boolean);
+  for (let i = 0; i < list.length; i += 6) {
+    const batch = list.slice(i, i + 6);
+    batch.forEach(a => {
+      try { a.muted = true; const p = a.play(); if (p && p.catch) p.catch(() => {}); } catch (e) {}
+    });
+    await sleep(70);
+    batch.forEach(a => { try { a.pause(); a.currentTime = 0; a.muted = false; } catch (e) {} });
   }
 }
-/* 点按手势里把解码器逐个唤醒一次：消除真机上每句配音首次播放的启动延迟（嘴型系统性迟到的主因之一） */
-function primeMedia() {
-  for (const f in AC) {
-    const a = AC[f];
-    try {
-      a.muted = true;
-      const p = a.play();
-      const done = () => { try { a.pause(); a.currentTime = 0; a.muted = false; } catch (e) {} };
-      if (p && p.then) p.then(done).catch(() => { try { a.muted = false; } catch (e) {} });
-      else done();
-    } catch (e) {}
-  }
-  ["seg2", "seg3", "seg4", "seg5", "seg6", "seg7", "seg8", "seg9", "seg10", "seg11"].forEach(k => {
+async function primeVids(keys) {
+  for (const k of keys) {
     const v = vids[k];
+    if (!v || !v.src) continue;
     try {
       const p = v.play();
-      if (p && p.then) p.then(() => { try { v.pause(); v.currentTime = 0; } catch (e) {} }).catch(() => {});
+      await Promise.race([p ? p.catch(() => {}) : Promise.resolve(), sleep(220)]);
+      v.pause();
+      try { v.currentTime = 0; } catch (e) {}
     } catch (e) {}
+  }
+}
+async function primeMedia() {
+  await primeAudios(ACT1_AUDIO);
+  await primeVids(["seg2", "seg3", "seg4", "seg5", "seg6"]);
+}
+/* 进第二幕后释放第一幕的配音元素（连同解码缓冲），贴纸游戏要用的 word-* 留着；
+   之后若回第一幕，getAudio 会按需从本地 Blob 重新建，不走网络 */
+function releaseAct1Audios() {
+  ACT1_AUDIO.forEach(f => {
+    if (f.indexOf("word-") === 0) return;
+    const a = AC[f];
+    if (!a) return;
+    try { a.pause(); a.removeAttribute("src"); a.load(); } catch (e) {}
+    delete AC[f];
   });
 }
 
@@ -1807,12 +1954,17 @@ async function playAct1() {
   confetti();
   pop("个人信息卡集满啦 🏆");
   await sleep(1000);
+  $("act2Btn").classList.remove("hidden");
   $("endVeil").classList.remove("hidden");
 }
 $("startBtn").onclick = async () => {
   if (!assetsReady) return;
-  primeMedia();           /* 手势内唤醒全部解码器，消除真机首播延迟 */
-  await sleep(350);
+  const btn = $("startBtn");
+  btn.disabled = true;
+  btn.textContent = "准备中…";
+  await primeMedia();     /* 分批唤醒解码器，消除真机首播延迟（不再一次全点火） */
+  btn.disabled = false;
+  btn.textContent = "开始上课";
   playAct1();
 };
 $("againBtn").onclick = playAct1;
@@ -1840,8 +1992,31 @@ function enterAct2Chrome() {
     "开学第一天 · 第 2 集 <small>七上 Unit 1《You and Me》第二幕 · 名字保卫战</small>");
 }
 function exitAct2Chrome() { setSlots(ACT1_SLOTS, ACT1_TTL); }
+let act2WaitToken = 0;
+let act2Primed = false;
 async function playAct2() {
-  if (!act2Ready) return;
+  if (!act2Primed) {
+    const myToken = ++act2WaitToken;
+    if (!act2Ready) {
+      /* 第二幕还没装齐：亮出它自己的加载幕等齐，进度和失败名单都在幕上，不让孩子干等死按钮 */
+      phaseRender(phase2);
+      $("act2LoadVeil").classList.remove("hidden");
+      await phase2.promise;
+      markAct2Ready();
+      if (myToken !== act2WaitToken) return; /* 孩子中途回第一幕了 */
+      if (!act2Ready) { phaseRender(phase2); return; } /* 失败名单留在幕上，等重试/取消 */
+      $("act2LoadTxt").textContent = "正在把教室准备好…";
+    } else {
+      $("act2LoadTxt").textContent = "正在把教室准备好…";
+      $("act2LoadVeil").classList.remove("hidden");
+    }
+    await primeAudios(ACT2_AUDIO);
+    await primeVids(ACT2_SEGS);
+    $("act2LoadVeil").classList.add("hidden");
+    if (myToken !== act2WaitToken) return;
+    act2Primed = true;
+  }
+  releaseAct1Audios();
   $("startVeil").classList.add("hidden");
   $("endVeil").classList.add("hidden");
   $("endVeil2").classList.add("hidden");
@@ -1913,6 +2088,7 @@ async function playAct2() {
 $("act2Btn").onclick = playAct2;
 $("act2DirectBtn").onclick = playAct2;
 $("bookAct2Btn").onclick = playAct2;
+$("act2CancelBtn").onclick = () => { act2WaitToken++; $("act2LoadVeil").classList.add("hidden"); };
 $("act2AgainBtn").onclick = playAct2;
 $("backToAct1Btn").onclick = () => { exitAct2Chrome(); playAct1(); };
 $("act2GameBtn").onclick = async () => {
@@ -1921,7 +2097,7 @@ $("act2GameBtn").onclick = async () => {
   $("endVeil2").classList.remove("hidden");
 };
 renderBook();
-loadAllAssets();
+startLoading();
 </script>
 </body>
 </html>
