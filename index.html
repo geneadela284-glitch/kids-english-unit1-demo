@@ -3,6 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<link rel="icon" href="data:,">
 <title>开学第一天 · 第1集 — 动画剧集式样板（第一幕）</title>
 <style>
   * { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
@@ -36,12 +37,13 @@
   .slot.on { border:2px solid #ffb52e; background:#fff6dd; box-shadow:0 0 10px rgba(255,181,46,.45); }
   .slot.on .v { color:#1e5c46; }
   .slot.helped { border-color:#7fc8a9; }
-  /* 舞台 */
+  /* 舞台：视频池双层轮换 */
   .stage { position:relative; flex:1; background:#000; overflow:hidden; }
   .stage video {
     position:absolute; inset:0; width:100%; height:100%;
-    object-fit:cover; transition:opacity .35s;
+    object-fit:cover; opacity:0; transition:opacity .25s; z-index:1;
   }
+  .stage video.on { opacity:1; z-index:2; }
   .pop {
     position:absolute; top:14px; right:12px; z-index:6;
     background:#ffb52e; color:#5c3a00; font-weight:800; font-size:14px;
@@ -74,6 +76,37 @@
     display:inline-block; background:#1e9e75; color:#fff; font-size:12px; font-weight:700;
     padding:3px 10px; border-radius:999px; margin-bottom:6px;
   }
+  /* 句型骨架卡 + 提示棒（游戏道具式） */
+  .framebar {
+    display:flex; align-items:center; gap:9px; margin-bottom:7px;
+    background:linear-gradient(135deg,#fff8dc,#ffe9ae);
+    border:2.5px solid #ffb52e; border-radius:16px; padding:8px 10px;
+    box-shadow:0 3px 10px rgba(209,143,18,.25);
+  }
+  .framebar .fairy { font-size:22px; flex:none; animation:bob 2.2s ease-in-out infinite; }
+  @keyframes bob { 0%,100%{transform:translateY(0);} 50%{transform:translateY(-3px);} }
+  .frame-main { flex:1; min-width:0; }
+  .frame-txt { font-size:17px; font-weight:800; color:#5c3a00; letter-spacing:.3px; line-height:1.3; }
+  .frame-txt .blank { color:#e07b00; border-bottom:3px dashed #ffb52e; padding:0 4px; }
+  .frame-txt .filled { color:#1e9e75; }
+  .wordpop {
+    display:none; margin-top:4px; font-size:13px; font-weight:700; color:#14614a;
+  }
+  .wordpop.show { display:block; animation:wordin .3s ease; }
+  .wordpop b {
+    background:#1e9e75; color:#fff; border-radius:999px; padding:2px 11px;
+    font-size:14px; margin-left:4px; display:inline-block;
+  }
+  @keyframes wordin { 0%{transform:scale(.6); opacity:0;} 100%{transform:scale(1); opacity:1;} }
+  .hintbtn {
+    flex:none; border:none; cursor:pointer; border-radius:999px;
+    background:linear-gradient(135deg,#8a63e8,#6a3fd4); color:#fff;
+    font-size:15px; font-weight:800; padding:9px 13px; line-height:1.25;
+    box-shadow:0 3px 0 #4c2a9e, 0 6px 14px rgba(106,63,212,.35);
+  }
+  .hintbtn:active { transform:translateY(2px); box-shadow:0 1px 0 #4c2a9e; }
+  .hintbtn .stars { display:block; font-size:11px; letter-spacing:2px; color:#ffd97a; }
+  .hintnote { font-size:12px; color:#7a6a45; margin-bottom:5px; min-height:16px; }
   .turn .hint { font-size:14px; color:#41584d; margin-bottom:4px; }
   .turn .hint b { color:#1e5c46; }
   .turn .heard { font-size:13px; color:#8a97a5; min-height:18px; margin-bottom:6px; }
@@ -144,13 +177,22 @@
   </div>
 
   <div class="stage" id="stage">
-    <video id="vid" playsinline muted preload="auto"></video>
+    <div id="pool"></div>
     <div class="pop" id="pop"></div>
     <div class="confetti" id="confetti"></div>
     <div class="caption" id="caption"><div class="who" id="capWho"></div><div class="line" id="capLine"></div></div>
 
     <div class="turn" id="turn">
       <span class="badge">轮到你啦 · YOUR TURN</span>
+      <div class="framebar">
+        <span class="fairy">🧚</span>
+        <div class="frame-main">
+          <div class="frame-txt" id="frameTxt"></div>
+          <div class="wordpop" id="wordPop"></div>
+        </div>
+        <button class="hintbtn" id="hintBtn">🪄 提示棒<span class="stars" id="hintStars">☆☆☆</span></button>
+      </div>
+      <div class="hintnote" id="hintNote">卡住啦？点提示棒，一次帮一点 ⭐</div>
       <div class="hint" id="turnHint"></div>
       <div class="heard" id="heard">点麦克风，开口说英语</div>
       <div class="microw">
@@ -186,11 +228,66 @@
 <script>
 "use strict";
 const $ = id => document.getElementById(id);
-const vid = $("vid"), caption = $("caption"), capWho = $("capWho"), capLine = $("capLine");
+const caption = $("caption"), capWho = $("capWho"), capLine = $("capLine");
 const turnEl = $("turn"), heardEl = $("heard"), micBtn = $("micBtn"), micNote = $("micNote");
 const chipsEl = $("chips"), chipRow = $("chipRow"), builtEl = $("built");
+const frameTxt = $("frameTxt"), wordPop = $("wordPop"), hintNote = $("hintNote"), hintStars = $("hintStars");
 const A = f => "audio/" + f + ".mp3";
 const state = { name: "Leo", attempts: 0, built: [], recog: null };
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+/* ---------- 视频池：六段全部预加载，双层轮换淡入淡出 ---------- */
+const SEGFILES = {
+  seg1: "seg1-mimi-hello.mp4", seg2: "seg2-peter-bag.mp4", seg3: "seg3-peter-age.mp4",
+  seg4: "seg4-peter-from.mp4", seg5: "seg5-peter-fromok.mp4", seg6: "seg6-lulu-class.mp4"
+};
+const vids = {};
+let activeVid = null;
+for (const k in SEGFILES) {
+  const v = document.createElement("video");
+  v.src = "clips/" + SEGFILES[k];
+  v.muted = true; v.setAttribute("muted", ""); v.setAttribute("playsinline", "");
+  v.preload = "auto";
+  $("pool").appendChild(v);
+  vids[k] = v;
+}
+function showSeg(key) {
+  const v = vids[key];
+  if (activeVid === v) return v;
+  const old = activeVid;
+  v.classList.add("on");
+  activeVid = v;
+  if (old) setTimeout(() => { old.classList.remove("on"); old.pause(); }, 280);
+  return v;
+}
+/* 首屏：第一段停在开头当活背景 */
+vids.seg1.classList.add("on"); activeVid = vids.seg1;
+vids.seg1.addEventListener("loadeddata", () => { try { vids.seg1.currentTime = 0.1; } catch (e) {} }, { once: true });
+
+/* ---------- 配音：全部预加载，逐句复用 ---------- */
+const AC = {};
+function getAudio(f) {
+  if (!AC[f]) { const a = new Audio(A(f)); a.preload = "auto"; AC[f] = a; }
+  return AC[f];
+}
+["mimi-hello","mimi-name-ok","mimi-name-retry","mimi-name-rescue",
+ "peter-bag","peter-name","peter-age","peter-age-ok","peter-from","peter-from-ok",
+ "mimi-age-retry","mimi-age-rescue","mimi-from-retry","mimi-from-rescue",
+ "mimi-class-retry","mimi-class-rescue","lulu-class","lulu-class-ok",
+ "model-name","model-age","model-from","model-class"].forEach(f => { try { getAudio(f).load(); } catch (e) {} });
+
+function playAudio(file) {
+  return new Promise(resolve => {
+    const a = getAudio(file);
+    let done = false;
+    const fin = () => { if (!done) { done = true; a.removeEventListener("ended", fin); resolve(); } };
+    a.addEventListener("ended", fin);
+    a.addEventListener("error", fin);
+    setTimeout(fin, 15000);
+    try { a.currentTime = 0; } catch (e) {}
+    a.play().catch(fin);
+  });
+}
 
 function lightSlot(key, value, helped) {
   const s = $("slot-" + key);
@@ -227,37 +324,19 @@ function showCaption(who, line) {
 }
 function hideCaption() { caption.classList.remove("show"); }
 
-function playAudio(file) {
-  return new Promise(resolve => {
-    const a = new Audio(A(file));
-    let done = false;
-    const fin = () => { if (!done) { done = true; resolve(); } };
-    a.addEventListener("ended", fin);
-    a.addEventListener("error", fin);
-    setTimeout(fin, 15000);
-    a.play().catch(fin);
-  });
-}
-
-/* 播放一段动画：视频静音播，配音驱动时间线；视频缺失/卡住时不阻塞剧情 */
-function playSegment(videoFile, lines) {
-  return new Promise(async resolve => {
-    hideCaption();
-    turnEl.classList.remove("show");
-    vid.style.opacity = "0";
-    await new Promise(r => setTimeout(r, 360));
-    vid.onerror = null;
-    vid.src = "clips/" + videoFile;
-    vid.currentTime = 0;
-    vid.play().then(() => { vid.style.opacity = "1"; }).catch(() => { vid.style.opacity = "1"; });
-    setTimeout(() => { vid.style.opacity = "1"; }, 1200);
-    for (const ln of lines) {
-      showCaption(ln.who, ln.text);
-      await playAudio(ln.audio);
-    }
-    vid.pause();
-    resolve();
-  });
+/* 播放一段动画：池中视频已缓冲，淡入衔接；配音按 delay 偏移对齐嘴动窗口 */
+async function playSegment(segKey, lines) {
+  hideCaption();
+  turnEl.classList.remove("show");
+  const v = showSeg(segKey);
+  try { v.currentTime = 0; } catch (e) {}
+  try { await v.play(); } catch (e) {}
+  for (const ln of lines) {
+    if (ln.delay) await sleep(ln.delay);
+    showCaption(ln.who, ln.text);
+    await playAudio(ln.audio);
+  }
+  v.pause();
 }
 
 /* ---------- 孩子回合 ---------- */
@@ -265,6 +344,9 @@ const TURNS = {
   name: {
     slot: "name",
     hint: "Mimi 还不知道你的名字呢！告诉她：<b>My name is …</b>",
+    frameHTML: "My name is <span class='blank'>＿＿</span>",
+    exampleHTML: "My name is <span class='filled'>Leo</span>",
+    firstWord: "My", model: "model-name",
     chips: ["My", "name", "is", "Leo", "Emma", "Jack", "Lily"],
     retryAudio: "mimi-name-retry", retryText: "Say it like this: My name is Leo! Now you — what's YOUR name?",
     rescueAudio: "mimi-name-rescue", rescueText: "Mimi: Nice name! Let's go and meet Peter!",
@@ -279,6 +361,9 @@ const TURNS = {
   name2: {
     slot: "name",
     hint: "Peter 的书包还挂着呢！告诉他你的名字，他的书包就能解开：<b>My name is …</b>",
+    frameHTML: "My name is <span class='blank'>＿＿</span>",
+    exampleHTML: "My name is <span class='filled'>Leo</span>",
+    firstWord: "My", model: "model-name",
     chips: ["My", "name", "is", "Leo", "Emma", "Jack", "Lily"],
     retryAudio: "mimi-name-retry", retryText: "Say it like this: My name is Leo!",
     rescueAudio: "mimi-name-rescue", rescueText: "Mimi tells Peter your name — the strap pops open!",
@@ -288,6 +373,9 @@ const TURNS = {
   age: {
     slot: "age",
     hint: "Peter 问你几岁啦：<b>I'm … years old.</b>",
+    frameHTML: "I'm <span class='blank'>＿＿</span> years old",
+    exampleHTML: "I'm <span class='filled'>12</span> years old",
+    firstWord: "I'm", model: "model-age",
     chips: ["I'm", "11", "12", "13", "years", "old"],
     retryAudio: "mimi-age-retry", retryText: "You ARE 12! And I am 12. Both! Say it: I'm 12 years old.",
     rescueAudio: "mimi-age-rescue", rescueText: "Peter says: We are both 12! Great!",
@@ -304,6 +392,9 @@ const TURNS = {
   from: {
     slot: "from",
     hint: "Peter 问你从哪里来：<b>I'm from …</b>",
+    frameHTML: "I'm from <span class='blank'>＿＿</span>",
+    exampleHTML: "I'm from <span class='filled'>China</span>",
+    firstWord: "I'm", model: "model-from",
     chips: ["I'm", "from", "China", "Japan", "America"],
     retryAudio: "mimi-from-retry", retryText: "Say it like this: I'm from China! Now you — where are YOU from?",
     rescueAudio: "mimi-from-rescue", rescueText: "Peter says: You are from China. Me too!",
@@ -317,6 +408,9 @@ const TURNS = {
   class: {
     slot: "class",
     hint: "Lulu 问你在哪个班：<b>I'm in Class 1, Grade 7.</b>",
+    frameHTML: "I'm in Class <span class='blank'>＿</span>, Grade <span class='blank'>＿</span>",
+    exampleHTML: "I'm in <span class='filled'>Class 1, Grade 7</span>",
+    firstWord: "I'm", model: "model-class",
     chips: ["I'm", "in", "Class 1,", "Grade 7"],
     retryAudio: "mimi-class-retry", retryText: "Say it: I'm in Class 1, Grade 7!",
     rescueAudio: "mimi-class-rescue", rescueText: "Lulu says: You are in Class 1, Grade 7 — the SAME class!",
@@ -328,7 +422,7 @@ const TURNS = {
 };
 function cap(s) { return s ? s.charAt(0).toUpperCase() + s.slice(1) : s; }
 
-let currentTurn = null, turnResolve = null;
+let currentTurn = null, turnResolve = null, hintLevel = 0;
 function childTurn(key) {
   return new Promise(resolve => {
     currentTurn = TURNS[key];
@@ -342,11 +436,37 @@ function childTurn(key) {
     heardEl.classList.remove("got");
     micNote.innerHTML = "说完停一下，<br>大家都在等你这一句。";
     $("turnHint").innerHTML = currentTurn.hint;
+    /* 提示系统复位：骨架卡回空白态，提示棒三星清空 */
+    hintLevel = 0;
+    frameTxt.innerHTML = currentTurn.frameHTML;
+    wordPop.classList.remove("show");
+    wordPop.innerHTML = "";
+    hintStars.textContent = "☆☆☆";
+    hintNote.textContent = "卡住啦？点提示棒，一次帮一点 ⭐";
     renderChips();
     hideCaption();
     setTimeout(() => turnEl.classList.add("show"), 250);
   });
 }
+/* 分级提示棒：1 露首词 → 2 露完整句型 → 3 听示范读音（之后再点重听） */
+$("hintBtn").onclick = () => {
+  if (!currentTurn) return;
+  if (hintLevel < 3) hintLevel++;
+  if (hintLevel === 1) {
+    hintStars.textContent = "★☆☆";
+    wordPop.innerHTML = "先说这个词 👉 <b>" + currentTurn.firstWord + "</b>";
+    wordPop.classList.add("show");
+    hintNote.textContent = "对啦，从这个词开头往下说！";
+  } else if (hintLevel === 2) {
+    hintStars.textContent = "★★☆";
+    frameTxt.innerHTML = currentTurn.exampleHTML;
+    hintNote.textContent = "完整的句子长这样，照着说就行（换成你自己的也行）！";
+  } else {
+    hintStars.textContent = "★★★";
+    hintNote.textContent = "听 Mimi 念一遍，跟上她 🎧 再点一次可以重听";
+    playAudio(currentTurn.model);
+  }
+};
 function renderChips() {
   chipRow.innerHTML = "";
   currentTurn.chips.forEach((w, i) => {
@@ -380,7 +500,7 @@ async function judge(raw) {
     currentTurn = null; turnResolve = null;
     turnEl.classList.remove("show");
     if (cb) cb();
-    await new Promise(rr => setTimeout(rr, 500));
+    await sleep(500);
     res(true);
     return;
   }
@@ -437,7 +557,7 @@ micBtn.onclick = () => {
   rec.onend = () => micBtn.classList.remove("listening");
   try { rec.start(); } catch (e) { micBtn.classList.remove("listening"); }
 };
-/* 点一下回合区空白处也能展开拼句兜底 */
+/* 点一下回合说明也能展开拼句兜底 */
 $("turnHint").onclick = () => chipsEl.classList.toggle("show");
 
 /* ---------- 主流程：第一幕 ---------- */
@@ -450,39 +570,39 @@ async function playAct1() {
     s.querySelector(".v").textContent = "?";
   });
 
-  /* 1 · Mimi 校门口迎新 */
-  await playSegment("seg1-mimi-hello.mp4", [
-    { who: "Mimi", text: "Hey! You made it! First day at our school. I'm Mimi. What's YOUR name, new friend?", audio: "mimi-hello" }
+  /* 1 · Mimi 校门口迎新（配音 +150ms：等第一个张嘴动作起来） */
+  await playSegment("seg1", [
+    { who: "Mimi", text: "Hey! You made it! First day at our school. I'm Mimi. What's YOUR name, new friend?", audio: "mimi-hello", delay: 150 }
   ]);
   await childTurn("name");
   showCaption("Mimi", "Nice to meet you, " + state.name + "! This card is yours. By the end of today, it will be FULL of you. Let's go — Peter is waiting!");
   await playAudio("mimi-name-ok");
 
-  /* 2 · Peter 书包被挂住 */
-  await playSegment("seg2-peter-bag.mp4", [
+  /* 2 · Peter 书包被挂住（两句与挣扎→转头特写的节奏原样对齐，不加偏移） */
+  await playSegment("seg2", [
     { who: "Peter", text: "Oh no... my bag! And — who are you? Are you new here?", audio: "peter-bag" },
     { who: "Peter", text: "Tell me — what's your name?", audio: "peter-name" }
   ]);
   await childTurn("name2");
 
   /* 3 · Peter 问年龄 */
-  await playSegment("seg3-peter-age.mp4", [
+  await playSegment("seg3", [
     { who: "Peter", text: "Nice name! I'm Peter. How old are you? Tell me!", audio: "peter-age" }
   ]);
   await childTurn("age");
 
-  /* 4 · Peter 庆祝 + 问来自哪里 */
-  await playSegment("seg4-peter-from.mp4", [
+  /* 4 · Peter 庆祝 + 问来自哪里（已剪掉中间闭嘴死区；第二句 +600ms 落进说话窗口） */
+  await playSegment("seg4", [
     { who: "Peter", text: "Me too! We are BOTH 12!", audio: "peter-age-ok" },
-    { who: "Peter", text: "Are you from... hmm. Where are you from?", audio: "peter-from" }
+    { who: "Peter", text: "Are you from... hmm. Where are you from?", audio: "peter-from", delay: 600 }
   ]);
   await childTurn("from");
 
-  /* 5 · Peter 同国庆祝 → 6 · Lulu 跑进来问班级 */
-  await playSegment("seg5-peter-fromok.mp4", [
-    { who: "Peter", text: "China! Me too! We are from the same country!", audio: "peter-from-ok" }
+  /* 5 · Peter 同国庆祝（+250ms：嘴动爆发比原语音晚约 0.3s） → 6 · Lulu 跑进来问班级 */
+  await playSegment("seg5", [
+    { who: "Peter", text: "China! Me too! We are from the same country!", audio: "peter-from-ok", delay: 250 }
   ]);
-  await playSegment("seg6-lulu-class.mp4", [
+  await playSegment("seg6", [
     { who: "Lulu", text: "Hey hey hey! New friend! What class are you in? Peter and I are in Class 1, Grade 7!", audio: "lulu-class" }
   ]);
   await childTurn("class");
@@ -491,15 +611,11 @@ async function playAct1() {
 
   confetti();
   pop("个人信息卡集满啦 🏆");
-  await new Promise(r => setTimeout(r, 1200));
+  await sleep(1200);
   $("endVeil").classList.remove("hidden");
 }
 $("startBtn").onclick = playAct1;
 $("againBtn").onclick = playAct1;
-
-/* 首屏：把第一段视频停在开头当活背景（不是静态图） */
-vid.src = "clips/seg1-mimi-hello.mp4";
-vid.addEventListener("loadeddata", () => { try { vid.currentTime = 0.1; } catch (e) {} }, { once: true });
 </script>
 </body>
 </html>
