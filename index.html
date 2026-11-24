@@ -50,6 +50,12 @@
     object-fit:cover; opacity:0; transition:opacity .25s; z-index:1;
   }
   .stage video.on { opacity:1; z-index:2; }
+  /* 定格呼吸运镜：暂停帧极缓慢推近，定格看起来是活的 */
+  .stage video.breathe { animation:breathe 9s ease-in-out infinite alternate; }
+  @keyframes breathe {
+    from { transform:scale(1.015) translate(0,0); }
+    to   { transform:scale(1.065) translate(-0.8%,-1.2%); }
+  }
   .stage.bounce { animation:stageBounce .55s ease; }
   @keyframes stageBounce { 0%{transform:scale(1);} 30%{transform:scale(1.025);} 55%{transform:scale(.995);} 100%{transform:scale(1);} }
   .stage.wiggle { animation:stageWiggle .6s ease; }
@@ -126,6 +132,11 @@
     width:64px; height:64px; border-radius:50%; border:none; flex:none;
     background:#ffb52e; font-size:28px; cursor:pointer;
     box-shadow:0 4px 0 #d18f12, 0 8px 18px rgba(0,0,0,.25);
+    animation:micIdle 2.6s ease-in-out infinite;
+  }
+  @keyframes micIdle {
+    0%,100% { box-shadow:0 4px 0 #d18f12, 0 0 0 0 rgba(255,181,46,.45), 0 8px 18px rgba(0,0,0,.25); }
+    50%     { box-shadow:0 4px 0 #d18f12, 0 0 0 10px rgba(255,181,46,0), 0 8px 18px rgba(0,0,0,.25); }
   }
   .mic:active { transform:translateY(2px); box-shadow:0 2px 0 #d18f12; }
   .mic.listening { background:#ff6b5e; animation:pulse 1s infinite; }
@@ -167,6 +178,11 @@
   }
   .veil .big:active { transform:translateY(3px); box-shadow:0 2px 0 #d18f12; }
   .veil .big.alt { background:#fff; color:#1e5c46; box-shadow:0 5px 0 #bdb493, 0 10px 24px rgba(0,0,0,.4); font-size:15px; padding:11px 30px; }
+  .veil .big:disabled { opacity:.55; box-shadow:0 5px 0 #8a6d1f, 0 10px 24px rgba(0,0,0,.4); }
+  .loadwrap { width:82%; max-width:300px; margin-top:4px; }
+  .loadbar { height:10px; background:rgba(255,255,255,.22); border-radius:99px; overflow:hidden; }
+  .loadbar i { display:block; height:100%; width:0%; background:linear-gradient(90deg,#1e9e75,#ffb52e); border-radius:99px; transition:width .25s; }
+  .loadtxt { font-size:12px; color:#e8e2cd; margin-top:7px; min-height:16px; }
   .hidden { display:none !important; }
   .confetti { position:absolute; inset:0; z-index:8; pointer-events:none; overflow:hidden; }
   .confetti i {
@@ -391,7 +407,11 @@
     <div class="veil" id="startVeil">
       <h1>🎬 开学第一天 · 第 1 集</h1>
       <p>Mimi 老师和新同学都在校门口等你。<br>动画演到你的台词会停下来——开口说，剧情才继续！<br>先帮谁、集贴纸，都由你决定。</p>
-      <button class="big" id="startBtn">开始上课</button>
+      <button class="big" id="startBtn" disabled>加载中…</button>
+      <div class="loadwrap" id="loadWrap">
+        <div class="loadbar"><i id="loadFill"></i></div>
+        <div class="loadtxt" id="loadTxt">正在把动画装进口袋…</div>
+      </div>
     </div>
 
     <div class="veil hidden" id="endVeil">
@@ -437,7 +457,7 @@ function pickVar(key, arr) {
   return arr[i];
 }
 
-/* ---------- 视频池：六段全部预加载，双层轮换淡入淡出 ---------- */
+/* ---------- 视频池：六段先整段下成 Blob 再本地播放，播放中零网络依赖 ---------- */
 const SEGFILES = {
   seg1: "seg1-mimi-hello.mp4", seg2: "seg2-peter-bag.mp4", seg3: "seg3-peter-age.mp4",
   seg4: "seg4-peter-from.mp4", seg5: "seg5-peter-fromok.mp4", seg6: "seg6-lulu-class.mp4"
@@ -446,7 +466,6 @@ const vids = {};
 let activeVid = null;
 for (const k in SEGFILES) {
   const v = document.createElement("video");
-  v.src = "clips/" + SEGFILES[k];
   v.muted = true; v.setAttribute("muted", ""); v.setAttribute("playsinline", "");
   v.preload = "auto";
   $("pool").appendChild(v);
@@ -458,20 +477,63 @@ function showSeg(key) {
   const old = activeVid;
   v.classList.add("on");
   activeVid = v;
-  if (old) setTimeout(() => { old.classList.remove("on"); old.pause(); }, 280);
+  if (old) setTimeout(() => { old.classList.remove("on"); old.pause(); old.classList.remove("breathe"); }, 280);
   return v;
 }
-/* 首屏：第一段停在开头当活背景 */
+/* 首屏：第一段停在开头当活背景（带呼吸运镜，不是一张死图） */
 vids.seg1.classList.add("on"); activeVid = vids.seg1;
-vids.seg1.addEventListener("loadeddata", () => { try { vids.seg1.currentTime = 0.1; } catch (e) {} }, { once: true });
+vids.seg1.addEventListener("loadeddata", () => { try { vids.seg1.currentTime = 0.1; } catch (e) {} setBreathe(vids.seg1, true); }, { once: true });
 
-/* ---------- 配音：全部预加载，逐句复用 ---------- */
-const AC = {};
-function getAudio(f) {
-  if (!AC[f]) { const a = new Audio(A(f)); a.preload = "auto"; AC[f] = a; }
-  return AC[f];
+/* ---------- 定格呼吸：暂停帧加极缓慢推近，看起来是活的 ---------- */
+function setBreathe(v, on) { if (v) v.classList.toggle("breathe", !!on); }
+
+/* ---------- 播放看门狗：该播的视频 currentTime 停滞 >0.8s 自动恢复 ---------- */
+const wdStats = { recoveries: 0, hardReloads: 0 };
+window.__wdStats = wdStats;
+let wdTarget = null; // {v, lastTime, lastAdvance, recoveries, armedAt, kickUsed}
+function armWatchdog(v) { wdTarget = { v: v, lastTime: v.currentTime || 0, lastAdvance: performance.now(), recoveries: 0, armedAt: performance.now(), kickUsed: false }; }
+function disarmWatchdog() { wdTarget = null; }
+setInterval(() => {
+  const w = wdTarget;
+  if (!w) return;
+  const v = w.v;
+  if (v !== activeVid || v.ended) return;
+  const now = performance.now();
+  if (v.paused) {
+    /* 刚启动就被打断（解码器预热竞争等）：2.5 秒内帮它再启动一次 */
+    if (!w.kickUsed && now - w.armedAt < 2500) { w.kickUsed = true; v.play().catch(() => {}); }
+    return;
+  }
+  if (Math.abs(v.currentTime - w.lastTime) > 0.03) {
+    w.lastTime = v.currentTime; w.lastAdvance = now; return;
+  }
+  if (now - w.lastAdvance > 800) {
+    wdStats.recoveries++;
+    const t = w.lastTime;
+    w.recoveries++;
+    if (w.recoveries >= 3) {
+      /* 软恢复无效：从 Blob 重新装载这一段（本地数据，瞬间完成） */
+      wdStats.hardReloads++;
+      const src = v.src;
+      try { v.pause(); v.removeAttribute("src"); v.load(); v.src = src; v.load(); v.currentTime = t; v.play().catch(() => {}); } catch (e) {}
+      w.recoveries = 0;
+    } else {
+      try { v.pause(); v.currentTime = t; v.play().catch(() => {}); } catch (e) {}
+    }
+    w.lastAdvance = now;
+  }
+}, 250);
+/* 定格：暂停＋关看门狗＋开呼吸 */
+function freezeFrame(v) {
+  v = v || activeVid;
+  if (!v) return;
+  try { v.pause(); } catch (e) {}
+  if (v === activeVid) disarmWatchdog();
+  setBreathe(v, true);
 }
-["mimi-hello","mimi-name-ok","mimi-name-retry","mimi-name-rescue",
+
+/* ---------- 资源 Blob 化：配音/音效也整段下载到本地，播放零网络依赖 ---------- */
+const AUDIO_FILES = ["mimi-hello","mimi-name-ok","mimi-name-retry","mimi-name-rescue",
  "peter-bag","peter-name","peter-age","peter-age-ok","peter-from","peter-from-ok",
  "mimi-age-retry","mimi-age-rescue","mimi-from-retry","mimi-from-rescue",
  "mimi-class-retry","mimi-class-rescue","lulu-class","lulu-class-ok",
@@ -483,7 +545,18 @@ function getAudio(f) {
  "mimi-seal-open","mimi-seal-star","mimi-seal-stay",
  "word-fullname","word-firstname","word-lastname","word-classmate","word-grade","word-country",
  "word-same","word-twin","word-band","word-guitar","word-tennis","word-hobby",
- "word-information","word-mistake","word-parrot","word-hotpot"].forEach(f => { try { getAudio(f).load(); } catch (e) {} });
+ "word-information","word-mistake","word-parrot","word-hotpot"];
+const SFX_FILES = ["ding","pop","zipper","whistle","sparkle","squawk","fanfare"];
+const blobURLs = {}; // "audio/x" / "sfx/x" -> objectURL
+let assetsReady = false;
+function audioURL(f) { return blobURLs["audio/" + f] || A(f); }
+function sfxURL(n) { return blobURLs["sfx/" + n] || ("sfx/" + n + ".mp3"); }
+
+const AC = {};
+function getAudio(f) {
+  if (!AC[f]) { const a = new Audio(audioURL(f)); a.preload = "auto"; AC[f] = a; }
+  return AC[f];
+}
 
 function playAudio(file) {
   return new Promise(resolve => {
@@ -500,15 +573,116 @@ function playAudio(file) {
 
 /* ---------- 音效：即时触发，不阻塞剧情 ---------- */
 const SFX = {};
+function ensureSfx() {
+  SFX_FILES.forEach(n => {
+    if (!SFX[n]) { try { const a = new Audio(sfxURL(n)); a.preload = "auto"; SFX[n] = a; } catch (e) {} }
+  });
+}
 function playSfx(name) {
   try {
-    if (!SFX[name]) { const a = new Audio("sfx/" + name + ".mp3"); a.preload = "auto"; SFX[name] = a; }
+    ensureSfx();
     const a = SFX[name];
+    if (!a) return;
     try { a.currentTime = 0; } catch (e) {}
     a.play().catch(() => {});
   } catch (e) {}
 }
-["ding","pop","zipper","whistle","sparkle","squawk","fanfare"].forEach(n => { try { const a = new Audio("sfx/" + n + ".mp3"); a.preload = "auto"; SFX[n] = a; } catch (e) {} });
+
+/* ---------- 整段下载：带进度，全部到齐才开演（失败三次退回直连地址） ---------- */
+async function fetchAsBlobURL(url, onChunk) {
+  let lastErr = null;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const r = await fetch(url);
+      if (!r.ok) throw new Error("http " + r.status);
+      const mime = r.headers.get("Content-Type") || "";
+      if (r.body && r.body.getReader) {
+        const reader = r.body.getReader();
+        const chunks = [];
+        let got = 0;
+        while (true) {
+          const d = await reader.read();
+          if (d.done) break;
+          chunks.push(d.value); got += d.value.length;
+          if (onChunk) onChunk(got);
+        }
+        return URL.createObjectURL(new Blob(chunks, { type: mime }));
+      }
+      const buf = await r.arrayBuffer();
+      if (onChunk) onChunk(buf.byteLength);
+      return URL.createObjectURL(new Blob([buf], { type: mime }));
+    } catch (e) { lastErr = e; await sleep(600); }
+  }
+  throw lastErr;
+}
+const loadState = { bytes: 0, totalBytes: 0, filesDone: 0, filesTotal: 0 };
+function renderLoadProgress() {
+  let pct;
+  if (loadState.totalBytes > 0) pct = Math.min(100, Math.round(loadState.bytes / loadState.totalBytes * 100));
+  else pct = loadState.filesTotal ? Math.round(loadState.filesDone / loadState.filesTotal * 100) : 0;
+  const fill = $("loadFill"), txt = $("loadTxt");
+  if (fill) fill.style.width = pct + "%";
+  if (txt && !assetsReady) txt.textContent = "正在把动画装进口袋… " + pct + "%";
+}
+async function loadAllAssets() {
+  const jobs = [];
+  for (const k in SEGFILES) jobs.push({ key: "clips/" + k, url: "clips/" + SEGFILES[k], seg: k });
+  AUDIO_FILES.forEach(f => jobs.push({ key: "audio/" + f, url: A(f) }));
+  SFX_FILES.forEach(n => jobs.push({ key: "sfx/" + n, url: "sfx/" + n + ".mp3" }));
+  loadState.filesTotal = jobs.length;
+  await Promise.all(jobs.map(async j => {
+    try {
+      const h = await fetch(j.url, { method: "HEAD" });
+      j.len = +h.headers.get("Content-Length") || 0;
+      loadState.totalBytes += j.len;
+    } catch (e) { j.len = 0; }
+  }));
+  renderLoadProgress();
+  const queue = jobs.slice();
+  async function worker() {
+    while (queue.length) {
+      const j = queue.shift();
+      let counted = 0;
+      try {
+        const u = await fetchAsBlobURL(j.url, got => { loadState.bytes += (got - counted); counted = got; renderLoadProgress(); });
+        blobURLs[j.key] = u;
+        if (j.seg) vids[j.seg].src = u;
+      } catch (e) {
+        if (j.seg) vids[j.seg].src = j.url; /* 退回直连，至少能播 */
+      }
+      loadState.filesDone++;
+      renderLoadProgress();
+    }
+  }
+  await Promise.all([worker(), worker(), worker(), worker()]);
+  AUDIO_FILES.forEach(f => { try { getAudio(f).load(); } catch (e) {} });
+  ensureSfx();
+  assetsReady = true;
+  const btn = $("startBtn");
+  btn.disabled = false;
+  btn.textContent = "开始上课";
+  $("loadTxt").textContent = "装好啦，点「开始上课」！";
+}
+/* 点按手势里把解码器逐个唤醒一次：消除真机上每句配音首次播放的启动延迟（嘴型系统性迟到的主因之一） */
+function primeMedia() {
+  for (const f in AC) {
+    const a = AC[f];
+    try {
+      a.muted = true;
+      const p = a.play();
+      const done = () => { try { a.pause(); a.currentTime = 0; a.muted = false; } catch (e) {} };
+      if (p && p.then) p.then(done).catch(() => { try { a.muted = false; } catch (e) {} });
+      else done();
+    } catch (e) {}
+  }
+  ["seg2", "seg3", "seg4", "seg5", "seg6"].forEach(k => {
+    const v = vids[k];
+    try {
+      const p = v.play();
+      if (p && p.then) p.then(() => { try { v.pause(); v.currentTime = 0; } catch (e) {} }).catch(() => {});
+    } catch (e) {}
+  });
+}
 
 function lightSlot(key, value, helped) {
   const s = $("slot-" + key);
@@ -548,19 +722,52 @@ function showCaption(who, line) {
 }
 function hideCaption() { caption.classList.remove("show"); }
 
-/* 播放一段动画：池中视频已缓冲，淡入衔接；配音按 delay 偏移对齐嘴动窗口 */
+/* 全局补偿：真机音频输出有约 100ms 系统延迟，配音统一提前这个量，再叠加逐段偏移 */
+const LEAD_MS = 100;
+function audioDurMs(f) {
+  const a = AC[f];
+  return (a && isFinite(a.duration) && a.duration > 0) ? a.duration * 1000 : 2500;
+}
+/* 播放一段动画：Blob 本地播放＋看门狗护航；配音按 delay/at 调度对齐嘴动窗口 */
 async function playSegment(segKey, lines) {
   hideCaption();
   turnEl.classList.remove("show");
   const v = showSeg(segKey);
+  setBreathe(v, false);
   try { v.currentTime = 0; } catch (e) {}
+  armWatchdog(v);
   try { await v.play(); } catch (e) {}
+  let elapsed = 0; // 已调度的配音时间线（ms，不含 LEAD）
   for (const ln of lines) {
-    if (ln.delay) await sleep(ln.delay);
+    let wait = 0;
+    if (ln.at != null) wait = Math.max(0, ln.at - elapsed);
+    else if (ln.delay) wait = ln.delay;
+    const effWait = Math.max(0, wait - LEAD_MS);
+    if (effWait) await sleep(effWait);
+    elapsed += wait + audioDurMs(ln.audio);
     showCaption(ln.who, ln.text);
     await playAudio(ln.audio);
+    if (v.ended) setBreathe(v, true); /* 视频先播完、配音还没完：定格帧保持呼吸，别死冻 */
   }
-  v.pause();
+  freezeFrame(v);
+}
+/* 反应台词专用：垫上说话角色本人的动画重播（可指定循环窗口），嘴动着说，不再对着静帧说话 */
+async function speakOver(segKey, who, text, audio, fromT, loopToT) {
+  const v = showSeg(segKey);
+  setBreathe(v, false);
+  try { v.currentTime = fromT || 0; } catch (e) {}
+  armWatchdog(v);
+  let loopTimer = null;
+  if (loopToT != null) {
+    loopTimer = setInterval(() => {
+      if (v.currentTime >= loopToT || v.ended) { try { v.currentTime = fromT || 0; } catch (e) {} }
+    }, 120);
+  }
+  try { await v.play(); } catch (e) {}
+  showCaption(who, text);
+  await playAudio(audio);
+  if (loopTimer) clearInterval(loopTimer);
+  freezeFrame(v);
 }
 /* ---------- 孩子回合 ---------- */
 const TURNS = {
@@ -581,6 +788,7 @@ const TURNS = {
       { who: "Mimi", audio: "mimi-name-rescue2", text: "It's OK! Names are tricky. Listen — let's meet Peter together!" }
     ],
     funny: "whistle",
+    cheerSeg: ["seg1", 0, 5.0],
     check(t) {
       const m = t.match(/(?:my name is|name is|i am|i'm)\s+([a-z]+)/);
       if (m) return { ok: true, value: cap(m[1]) };
@@ -606,6 +814,8 @@ const TURNS = {
       { who: "Peter", audio: "peter-bag-rescue2", text: "Oh no — my zipper is stuck AGAIN! Silly bag! Never mind! I'm Peter, and YOU are my new friend!" }
     ],
     funny: "zipper",
+    cheerSeg: ["seg2", 3.3, 6.42],
+    rescueSeg: ["seg2", 3.3, 6.42],
     check(t) { return TURNS.name.check(t); },
     onOk() { pop("啪！书包解开了 🎒"); }
   },
@@ -622,6 +832,7 @@ const TURNS = {
       { who: "Peter", audio: "peter-age-rescue2", text: "Oops! My bag strap is stuck again! Ha ha! I am 12 years old — and you are 12 too!" }
     ],
     funny: "zipper",
+    rescueSeg: ["seg3", 2.4, 5.0],
     check(t) {
       const nums = { seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12, thirteen: 13, fourteen: 14, fifteen: 15 };
       let v = null;
@@ -645,6 +856,7 @@ const TURNS = {
       { who: "Peter", audio: "peter-from-rescue2", text: "Wait — my bag is dancing! Ha ha! I am from China. You too, right?" }
     ],
     funny: "zipper",
+    rescueSeg: ["seg4", 3.1, 6.83],
     check(t) {
       const m = t.match(/from\s+([a-z ]+?)(?:\.|$)/);
       if (m) return { ok: true, value: cap(m[1].trim()) };
@@ -665,6 +877,7 @@ const TURNS = {
       { who: "Lulu", audio: "lulu-class-rescue2", text: "Oops! My tennis ball ran away! Never mind — we are in Class 1, Grade 7. The SAME class!" }
     ],
     funny: "whistle",
+    rescueSeg: ["seg6", 1.5, 6.0],
     check(t) {
       if (t.includes("class") && (t.includes("grade") || /\b1\b/.test(t) || t.includes("one"))) return { ok: true, value: "Class 1, Grade 7" };
       return { ok: false };
@@ -758,8 +971,8 @@ async function judge(raw) {
     if (cb) cb();
     if (cfg.okCheers) {
       const c = pickVar(cfg.key + "Ok", cfg.okCheers);
-      showCaption(c.who, c.text);
-      await playAudio(c.audio);
+      if (cfg.cheerSeg) await speakOver(cfg.cheerSeg[0], c.who, c.text, c.audio, cfg.cheerSeg[1], cfg.cheerSeg[2]);
+      else { showCaption(c.who, c.text); await playAudio(c.audio); }
     } else {
       await sleep(500);
     }
@@ -775,8 +988,14 @@ async function judge(raw) {
     turnEl.classList.remove("show");
     if (cfg.funny) { playSfx(cfg.funny); stageWiggle(); }
     const rv = pickVar(cfg.key + "Rescue", cfg.rescues);
-    showCaption(rv.who, rv.text);
-    await playAudio(rv.audio);
+    if (cfg.rescueSeg && rv.audio.indexOf("mimi-") !== 0) {
+      /* 角色本人的圆场台词：垫他的动画重播，嘴动着说 */
+      await speakOver(cfg.rescueSeg[0], rv.who, rv.text, rv.audio, cfg.rescueSeg[1], cfg.rescueSeg[2]);
+    } else {
+      /* Mimi 的旁白圆场：定格帧带呼吸即可 */
+      showCaption(rv.who, rv.text);
+      await playAudio(rv.audio);
+    }
     const defaults = { name: state.name, name2: state.name, age: "12 岁", from: "China", class: "Class 1, Grade 7" };
     lightSlot(cfg.slot, defaults[cfg.key], true);
     if (cfg.onOk) cfg.onOk();
@@ -883,7 +1102,7 @@ async function parrotEvent() {
   await sleep(900);
   if (parrotSkipped) { $("parrot").classList.add("hidden"); return; }
   /* 变调复读：优先放孩子自己的原声（1.35 倍速=变调），没有录音就放示范句变调版 */
-  const src = state.lastVoiceURL || (state.lastModelAudio ? A(state.lastModelAudio) : null);
+  const src = state.lastVoiceURL || (state.lastModelAudio ? audioURL(state.lastModelAudio) : null);
   if (src) {
     await new Promise(res => {
       const a = new Audio(src);
@@ -898,11 +1117,10 @@ async function parrotEvent() {
       a.play().catch(fin);
     });
   }
-  if (!parrotSkipped) {
-    showCaption("Mimi", "Ha ha! The parrot copied you! Your English is famous at this school now!");
-    await playAudio("mimi-parrot-react");
-  }
   $("parrot").classList.add("hidden");
+  if (!parrotSkipped) {
+    await speakOver("seg1", "Mimi", "Ha ha! The parrot copied you! Your English is famous at this school now!", "mimi-parrot-react", 0, 5.0);
+  }
 }
 
 /* ---------- 小游戏：开口出招 · 听音抢答（60 秒） ---------- */
@@ -1096,21 +1314,20 @@ async function peterRoute() {
   await childTurn("name2");
   await maybeParrot("afterName2");
 
-  /* Peter 问年龄 */
+  /* Peter 问年龄（配音 +250ms：第一句落在特写嘴动窗口里） */
   await playSegment("seg3", [
-    { who: "Peter", text: "Nice name! I'm Peter. How old are you? Tell me!", audio: "peter-age" }
+    { who: "Peter", text: "Nice name! I'm Peter. How old are you? Tell me!", audio: "peter-age", delay: 250 }
   ]);
   await childTurn("age");
   await maybeParrot("afterAge");
 
-  /* Peter 庆祝（台词二选一，随机不重复）+ 问来自哪里 */
+  /* Peter 庆祝 + 问来自哪里：庆祝句 +500ms 落进庆祝嘴动窗；提问句钉在 3.02s 绝对时刻（提问嘴动窗起点），不受庆祝句长度影响 */
   const ageOk = pickVar("ageOkSeg", [
-    { audio: "peter-age-ok", text: "Me too! We are BOTH 12!" },
-    { audio: "peter-age-ok2", text: "BOTH 12! Best day ever! High five!" }
+    { audio: "peter-age-ok", text: "Me too! We are BOTH 12!" }
   ]);
   await playSegment("seg4", [
-    { who: "Peter", text: ageOk.text, audio: ageOk.audio },
-    { who: "Peter", text: "Are you from... hmm. Where are you from?", audio: "peter-from", delay: 600 }
+    { who: "Peter", text: ageOk.text, audio: ageOk.audio, delay: 500 },
+    { who: "Peter", text: "Are you from... hmm. Where are you from?", audio: "peter-from", at: 3020 }
   ]);
   await childTurn("from");
   await maybeParrot("afterFrom");
@@ -1126,15 +1343,14 @@ async function peterRoute() {
 }
 async function luluScene() {
   await playSegment("seg6", [
-    { who: "Lulu", text: "Hey hey hey! New friend! What class are you in? Peter and I are in Class 1, Grade 7!", audio: "lulu-class" }
+    { who: "Lulu", text: "Hey hey hey! New friend! What class are you in? Peter and I are in Class 1, Grade 7!", audio: "lulu-class", delay: 100 }
   ]);
   await childTurn("class");
   const ok = pickVar("luluOk", [
     { audio: "lulu-class-ok", text: "The SAME class! We are classmates now!" },
     { audio: "lulu-class-ok2", text: "Yay! Class 1, Grade 7 — together every day!" }
   ]);
-  showCaption("Lulu", ok.text);
-  await playAudio(ok.audio);
+  await speakOver("seg6", "Lulu", ok.text, ok.audio, 1.5, 6.0);
 }
 async function playAct1() {
   $("startVeil").classList.add("hidden");
@@ -1151,17 +1367,14 @@ async function playAct1() {
     { who: "Mimi", text: "Hey! You made it! First day at our school. I'm Mimi. What's YOUR name, new friend?", audio: "mimi-hello", delay: 150 }
   ]);
   await childTurn("name");
-  showCaption("Mimi", "Nice to meet you, " + state.name + "! This card is yours. By the end of today, it will be FULL of you!");
-  await playAudio("mimi-name-ok");
+  await speakOver("seg1", "Mimi", "Nice to meet you, " + state.name + "! This card is yours. By the end of today, it will be FULL of you!", "mimi-name-ok", 0, 5.0);
 
   /* 2 · 分支点：先帮谁，孩子决定 */
-  showCaption("Mimi", "Look! Peter's bag is stuck over there — and here comes Lulu with her tennis racket! Who do you want to meet first?");
-  await playAudio("mimi-branch-ask");
+  await speakOver("seg1", "Mimi", "Look! Peter's bag is stuck over there — and here comes Lulu with her tennis racket! Who do you want to meet first?", "mimi-branch-ask", 0, 5.0);
   const branch = await childChoice();
   if (branch === "lulu") {
     await luluScene();
-    showCaption("Lulu", "Come on! Peter is over there — his bag is stuck! Let's go and help him!");
-    await playAudio("lulu-help-peter");
+    await speakOver("seg6", "Lulu", "Come on! Peter is over there — his bag is stuck! Let's go and help him!", "lulu-help-peter", 1.5, 6.0);
     await peterRoute();
   } else {
     await peterRoute();
@@ -1169,8 +1382,7 @@ async function playAct1() {
   }
 
   /* 3 · 结尾小游戏：听音抢答 */
-  showCaption("Mimi", "Game time! Listen to the word, and catch the right card! Ready? Go!");
-  await playAudio("mimi-game-intro");
+  await speakOver("seg1", "Mimi", "Game time! Listen to the word, and catch the right card! Ready? Go!", "mimi-game-intro", 0, 5.0);
   await runGame();
 
   /* 4 · 贴纸奖励 + 收尾 */
@@ -1180,7 +1392,12 @@ async function playAct1() {
   await sleep(1000);
   $("endVeil").classList.remove("hidden");
 }
-$("startBtn").onclick = playAct1;
+$("startBtn").onclick = async () => {
+  if (!assetsReady) return;
+  primeMedia();           /* 手势内唤醒全部解码器，消除真机首播延迟 */
+  await sleep(350);
+  playAct1();
+};
 $("againBtn").onclick = playAct1;
 $("gameReplayBtn").onclick = async () => {
   $("endVeil").classList.add("hidden");
@@ -1188,6 +1405,7 @@ $("gameReplayBtn").onclick = async () => {
   $("endVeil").classList.remove("hidden");
 };
 renderBook();
+loadAllAssets();
 </script>
 </body>
 </html>
