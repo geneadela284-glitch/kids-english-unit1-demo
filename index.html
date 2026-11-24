@@ -145,6 +145,9 @@
   @keyframes pulse { 0%{box-shadow:0 0 0 0 rgba(255,107,94,.5);} 100%{box-shadow:0 0 0 18px rgba(255,107,94,0);} }
   .micnote { font-size:12px; color:#7a6a45; line-height:1.5; }
   .micdiag { font-size:10px; color:#b9c2c9; margin-top:5px; min-height:13px; letter-spacing:.2px; }
+  .volbar { height:8px; width:180px; max-width:70%; margin:7px auto 0; background:#edf1ee; border-radius:99px; overflow:hidden; opacity:0; transition:opacity .2s; }
+  .volbar.show { opacity:1; }
+  .volbar i { display:block; height:100%; width:0%; background:linear-gradient(90deg,#57c98a,#ffd23e,#ff6b5e); border-radius:99px; transition:width .09s linear; }
   .chips { margin-top:10px; display:none; }
   .chips.show { display:block; }
   .chips .lbl { font-size:12px; color:#7a6a45; margin-bottom:6px; }
@@ -336,8 +339,9 @@
       <div class="heard" id="heard">点麦克风，开口说英语</div>
       <div class="microw">
         <button class="mic" id="micBtn" aria-label="开口说">🎤</button>
-        <div class="micnote" id="micNote">说完停一下，<br>大家都在等你这一句。</div>
+        <div class="micnote" id="micNote">点麦克风开始说，<br>说完再点一下 🎤</div>
       </div>
+      <div class="volbar" id="volBar"><i id="volFill"></i></div>
       <div class="micdiag" id="micDiag"></div>
       <div class="chips" id="chips">
         <div class="lbl">说不出来？点一点，把句子拼出来 👇</div>
@@ -437,9 +441,11 @@ const chipsEl = $("chips"), chipRow = $("chipRow"), builtEl = $("built");
 const frameTxt = $("frameTxt"), wordPop = $("wordPop"), hintNote = $("hintNote"), hintStars = $("hintStars");
 const stageEl = $("stage");
 const A = f => "audio/" + f + ".mp3";
-const state = { name: "Leo", attempts: 0, built: [], recog: null, lastSentence: "", lastVoiceURL: null, lastModelAudio: null };
-/* iOS（含 iPad 桌面 UA、WKWebView）：本页开过 getUserMedia 录音会话后，系统语音
-   识别会拿到静音流（识别在跑却永远没声）。所以 iOS 上真声捕获整条禁用。 */
+const state = { name: "Leo", attempts: 0, built: [], lastSentence: "", lastVoiceURL: null, lastModelAudio: null };
+/* 语音作答架构（2026-11-24 换代）：苹果自带网页识别两轮修复后真机仍第二题
+   听不见，整条弃用。现行：MediaRecorder 录音 → 自有服务器（硅基流动
+   SenseVoice）转文字 → judge 宽容匹配。IS_IOS 只留作调试标记，不再 gate
+   任何功能（录音全平台统一，iOS 的 mp4 产物由服务器 ffmpeg 转码）。 */
 const IS_IOS = (() => {
   const ua = navigator.userAgent || "";
   if (/iPhone|iPad|iPod/.test(ua)) return true;
@@ -925,7 +931,7 @@ function childTurn(key) {
     $("sayBuilt").disabled = true;
     heardEl.textContent = "点麦克风，开口说英语";
     heardEl.classList.remove("got");
-    micNote.innerHTML = "说完停一下，<br>大家都在等你这一句。";
+    micNote.innerHTML = "点麦克风开始说，<br>说完再点一下 🎤";
     $("turnHint").innerHTML = currentTurn.hint;
     /* 提示系统复位：骨架卡回空白态，提示棒三星清空 */
     hintLevel = 0;
@@ -1035,45 +1041,159 @@ async function judge(raw) {
   playAudio(cfg.retryAudio);
 }
 
-/* 孩子原声捕获（给鹦鹉学舌用；不可用时静默跳过）
-   手机端纪律：同一时刻只许一路录音占麦克风。停录时立刻 stop 掉 stream 的 tracks
-   （不等 onstop 慢慢收尾）；还在路上的 getUserMedia 承诺落地时先查代次、过期就
-   自释放。否则麦克风被本页自己的录音流占住，下一题的语音识别就拿不到声音——
-   真机实测「第一题能录、第二题起录不了」的原因之一。 */
-let mediaRec = null, captureStream = null, captureGen = 0;
-function releaseCapture() {
-  captureGen++;                       /* 让未落地的 getUserMedia 承诺过期自释放 */
-  const rec = mediaRec; mediaRec = null;
-  if (rec) { try { if (rec.state !== "inactive") rec.stop(); } catch (e) {} }
-  const st = captureStream; captureStream = null;
+/* ---------- 语音作答：点按录音 → 自有服务器转写 → judge ----------
+   架构（2026-11-24 换代）：弃用浏览器自带 SpeechRecognition（iOS 真机两轮
+   修复仍第二题听不见）。点麦克风开始录音（MediaRecorder，这条在华哥手机上
+   已证实可用），说完再点一次（或满 6 秒自动停）→ 上传到自有 ASR 接口
+   （阿里云 kids-asr → 硅基流动 SenseVoice）转文字 → 走现行 judge 宽容匹配。
+   这段判定录音同时就是鹦鹉的真声素材（全平台统一，含 iOS）。
+   麦克风纪律沿用第二轮的代次守卫：同一时刻只准一路录音；停录立刻 stop
+   tracks；teardown 时代次自增，让迟到的 getUserMedia 承诺与 onstop 回调
+   过期作废，绝不把占麦问题带回来。 */
+const ASR_URL = "https://huage-erp.kdns.fr/asr/transcribe?lang=en";
+const ASR_TOKEN = "9ab9b987c7e92ceb191670ce80726307";
+const REC_MAX_MS = 6000, ASR_FETCH_TIMEOUT_MS = 12000;
+let answerRec = null, answerStream = null, recGen = 0, recBusy = false;
+let recElapsedTimer = null, recAutoTimer = null, recStartStamp = 0;
+let meterCtx = null, meterTimer = null;
+
+function clearRecTimers() {
+  if (recElapsedTimer) { clearInterval(recElapsedTimer); recElapsedTimer = null; }
+  if (recAutoTimer) { clearTimeout(recAutoTimer); recAutoTimer = null; }
+}
+function releaseAnswerStream() {
+  const st = answerStream; answerStream = null;
   if (st) st.getTracks().forEach(tr => { try { tr.stop(); } catch (e) {} });
 }
-function startCapture() {
-  if (IS_IOS) return;   /* iOS（含 WKWebView）：本页开过录音会话后系统识别会拿到静音流——真声捕获整条禁用，鹦鹉改走示范句变调兜底（lastVoiceURL 保持空） */
-  releaseCapture();                   /* 先把上一路收干净，再开新的一路 */
-  if (!navigator.mediaDevices || !window.MediaRecorder) return;
-  const gen = captureGen;
+/* 音量小条：从同一路录音流取电平（不新开任何采集通道）；取不到就退回呼吸动画 */
+function startMeter(stream) {
+  const bar = $("volBar"), fill = $("volFill");
+  bar.classList.add("show");
+  let fake = false, t = 0;
+  try {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) throw new Error("no AudioContext");
+    meterCtx = new Ctx();
+    const src = meterCtx.createMediaStreamSource(stream);
+    const an = meterCtx.createAnalyser();
+    an.fftSize = 256;
+    src.connect(an);
+    const data = new Uint8Array(an.frequencyBinCount);
+    meterTimer = setInterval(() => {
+      if (meterCtx && meterCtx.state === "suspended") { meterCtx.resume().catch(() => {}); }
+      an.getByteTimeDomainData(data);
+      let peak = 0;
+      for (let i = 0; i < data.length; i++) { const v = Math.abs(data[i] - 128) / 128; if (v > peak) peak = v; }
+      fill.style.width = Math.min(100, Math.round(peak * 150)) + "%";
+    }, 100);
+  } catch (e) { fake = true; }
+  if (fake) {
+    meterTimer = setInterval(() => { t += 0.35; fill.style.width = (45 + Math.round(35 * Math.sin(t))) + "%"; }, 100);
+  }
+}
+function stopMeter() {
+  if (meterTimer) { clearInterval(meterTimer); meterTimer = null; }
+  if (meterCtx) { try { meterCtx.close(); } catch (e) {} meterCtx = null; }
+  $("volBar").classList.remove("show");
+  $("volFill").style.width = "0%";
+}
+function startAnswerRecording() {
+  if (recBusy) return;
+  if (!navigator.mediaDevices || !window.MediaRecorder) {
+    micFailLoud("这台设备录不了音，用下面的拼句一样过关！");
+    return;
+  }
+  recBusy = true;
+  micBtn.classList.add("preparing");
+  heardEl.textContent = "麦克风准备中…";
+  diagEvent("点击");
+  silenceOutputs();                     /* 开录前先静场，别把播放声录进去 */
+  releaseAnswerStream();                /* 先收干净上一路，再开新的一路 */
+  const gen = ++recGen;
   navigator.mediaDevices.getUserMedia({ audio: true }).then(stream => {
-    if (gen !== captureGen) { stream.getTracks().forEach(tr => { try { tr.stop(); } catch (e) {} }); return; }
-    captureStream = stream;
+    if (gen !== recGen) { stream.getTracks().forEach(tr => { try { tr.stop(); } catch (e) {} }); recBusy = false; return; }
+    answerStream = stream;
     const chunks = [];
     let rec = null;
-    try { rec = new MediaRecorder(stream); } catch (e) { releaseCapture(); return; }
-    mediaRec = rec;
+    try { rec = new MediaRecorder(stream); } catch (e) { releaseAnswerStream(); recBusy = false; micFailLoud("录音没启动起来，用下面的拼句一样过关！"); return; }
+    answerRec = rec;
     rec.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
     rec.onstop = () => {
-      stream.getTracks().forEach(tr => { try { tr.stop(); } catch (e) {} });
-      if (captureStream === stream) captureStream = null;
-      if (mediaRec === rec) mediaRec = null;
-      if (chunks.length) {
-        if (state.lastVoiceURL) { try { URL.revokeObjectURL(state.lastVoiceURL); } catch (e) {} }
-        state.lastVoiceURL = URL.createObjectURL(new Blob(chunks, { type: rec.mimeType || "audio/webm" }));
-      }
+      releaseAnswerStream();
+      if (answerRec === rec) answerRec = null;
+      clearRecTimers(); stopMeter();
+      micBtn.classList.remove("listening");
+      if (gen !== recGen) { recBusy = false; return; }   /* 被 teardown 取消：不上传、不判定 */
+      const blob = new Blob(chunks, { type: rec.mimeType || "audio/mp4" });
+      if (!blob.size) { recBusy = false; micFailLoud("刚才没录到声音——再点一次麦克风试试，或者用下面的拼句过关！"); return; }
+      /* 判定录音同时存为鹦鹉真声素材（全平台统一） */
+      if (state.lastVoiceURL) { try { URL.revokeObjectURL(state.lastVoiceURL); } catch (e) {} }
+      state.lastVoiceURL = URL.createObjectURL(blob);
+      uploadAndJudge(blob).finally(() => { recBusy = false; });
     };
-    try { rec.start(); } catch (e) { releaseCapture(); }
-  }).catch(() => {});
+    try { rec.start(); } catch (e) { releaseAnswerStream(); recBusy = false; micFailLoud("录音没启动起来，用下面的拼句一样过关！"); return; }
+    recStartStamp = Date.now();
+    micBtn.classList.remove("preparing");
+    micBtn.classList.add("listening");
+    heardEl.textContent = "在录啦…说完再点一下麦克风 🎤";
+    micNote.innerHTML = "录音中 0 秒…<br>说完点一下麦克风";
+    diagEvent("录音");
+    startMeter(stream);
+    recElapsedTimer = setInterval(() => {
+      const s = Math.floor((Date.now() - recStartStamp) / 1000);
+      micNote.innerHTML = "录音中 " + s + " 秒…<br>说完点一下麦克风";
+    }, 250);
+    recAutoTimer = setTimeout(() => { stopAnswerRecording(); }, REC_MAX_MS);
+  }).catch(() => {
+    if (gen !== recGen) { recBusy = false; return; }
+    recBusy = false;
+    micBtn.classList.remove("preparing");
+    diagEvent("err:麦克风权限");
+    micFailLoud("麦克风被关掉了，去浏览器设置里打开；也可以用下面的拼句过关！");
+  });
 }
-function stopCapture() { releaseCapture(); }
+function stopAnswerRecording() {
+  const rec = answerRec;
+  if (rec && rec.state !== "inactive") { try { rec.stop(); } catch (e) {} }
+}
+/* 上传转写：成功把文字交给 judge；失败/超时/空转写一律落到可见提示＋拼句兜底 */
+async function uploadAndJudge(blob) {
+  micBtn.classList.add("preparing");
+  heardEl.textContent = "听听你说的对不对…";
+  diagEvent("上传");
+  const ctrl = new AbortController();
+  const to = setTimeout(() => { try { ctrl.abort(); } catch (e) {} }, ASR_FETCH_TIMEOUT_MS);
+  try {
+    const resp = await fetch(ASR_URL, {
+      method: "POST",
+      headers: { "X-Kids-Token": ASR_TOKEN, "Content-Type": blob.type || "audio/mp4" },
+      body: blob, signal: ctrl.signal
+    });
+    clearTimeout(to);
+    if (!resp.ok) throw new Error("http " + resp.status);
+    const data = await resp.json();
+    const text = ((data && data.text) || "").trim();
+    micBtn.classList.remove("preparing");
+    if (!text) {
+      diagEvent("转写空");
+      micFailLoud("好像没听到你说话哦——大声一点再试一次，或者用下面的拼句过关！");
+      return;
+    }
+    diagEvent("转写✓");
+    heardEl.textContent = "你说的是：" + text;
+    judge(text);
+  } catch (e) {
+    clearTimeout(to);
+    micBtn.classList.remove("preparing");
+    diagEvent(e && e.name === "AbortError" ? "上传超时" : "上传失败");
+    micFailLoud("网络有点慢，没听清——再点一次麦克风试试，或者用下面的拼句过关！");
+  }
+}
+micBtn.onclick = () => {
+  /* 正在录音 → 点按停录上传；空闲 → 开始录音。点击立刻有可见反馈 */
+  if (answerRec && answerRec.state === "recording") { stopAnswerRecording(); return; }
+  startAnswerRecording();
+};
 
 /* ---------- 麦克风诊断角标：记录最近一次识别的事件链，华哥截图就能回报 ---------- */
 const micDiag = { turn: "-", events: [], watchdog: 0 };
@@ -1089,13 +1209,18 @@ function diagEvent(txt) {
   renderDiag();
 }
 
-/* 本题判定完成那一刻就把识别＋录音彻底收尾（不等下一题点击时才收）：
-   stop 实例、释放录音 tracks，onend 回来后 recogAlive 自动清零；判定到下一题之间
-   隔着反应动画与下一段剧情，音频会话有充分时间回落，下一题点击时页面已是干净状态。 */
+/* 本题判定完成那一刻就把录音链路彻底收尾（不等下一题点击时才收）：
+   代次自增让进行中的录音/迟到的回调过期作废，停掉 recorder、释放 tracks、
+   清计时与音量条、复位按钮。下一题点击时页面已是干净状态。 */
 function teardownMic() {
-  stopCapture();
-  const rec = state.recog;
-  if (rec) { try { rec.stop(); } catch (e) {} }
+  recGen++;
+  const rec = answerRec; answerRec = null;
+  if (rec) { try { if (rec.state !== "inactive") rec.stop(); } catch (e) {} }
+  releaseAnswerStream();
+  clearRecTimers();
+  stopMeter();
+  recBusy = false;
+  micBtn.classList.remove("listening", "preparing");
 }
 /* 开识别前先静场：停掉一切还在响的声音输出（反应台词残留、示范音、音效），
    别让播放通道占着音频会话。页面不用 WebAudio AudioContext（已核查），
@@ -1112,151 +1237,7 @@ function micFailLoud(msg) {
   chipsEl.classList.add("show");
 }
 
-/* 语音识别
-   iOS 的两条实证教训：①本页开过 getUserMedia 录音会话后，系统识别会拿到静音流
-   （识别在跑、永远没声）——iOS 上真声捕获已整条禁用（见 startCapture）。
-   ②旧实例没 onend 就 start 新实例会静默失败。所以：每题新建实例；启动前先 stop
-   旧实例并等它 onend 收尾（带超时兜底）；判定完成那一刻就收尾（teardownMic）。
-   另外两只看门狗：onstart 2.5 秒没来＝启动被静默吞掉；启动后 4 秒零 interim
-   结果＝没收到音。两种情况都落到可见提示＋拼句兜底，绝不让孩子干瞪眼。
-   整条链路包在 try/catch 里：任何一步抛错都落到 micFailLoud，不许静默死。 */
-let recogAlive = false, recogStarting = false, recogStartStamp = 0, recogSeq = 0, recogEndWaiters = [];
-function recogEnded(seq) {
-  if (seq === recogSeq) recogAlive = false;
-  const ws = recogEndWaiters; recogEndWaiters = [];
-  ws.forEach(f => { try { f(); } catch (e) {} });
-}
-function waitRecogEnded(ms) {
-  if (!recogAlive) return Promise.resolve();
-  return new Promise(res => {
-    let done = false;
-    const f = () => { if (!done) { done = true; res(); } };
-    recogEndWaiters.push(f);
-    setTimeout(f, ms || 900);         /* onend 迟迟不来也放行，不卡死 */
-  });
-}
-async function startListening(isRetry) {
-  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (!SR) {
-    diagEvent("无识别支持");
-    micFailLoud("这台设备听不到声音，用下面的拼句一样过关！");
-    return;
-  }
-  if (recogStarting) {
-    if (Date.now() - recogStartStamp < 3000) return;   /* 正在启动中，忽略连点 */
-    recogStarting = false;                              /* 锁超过 3 秒还没清＝上次启动卡死，强制解锁 */
-    diagEvent("锁超时解锁");
-  }
-  recogStarting = true; recogStartStamp = Date.now();
-  try {
-    silenceOutputs();                                   /* 开识别前先静场 */
-    if (state.recog) { try { state.recog.stop(); } catch (e) {} }
-    await waitRecogEnded(900);        /* 等旧实例彻底结束再 start（手机端关键） */
-    const rec = new SR();
-    state.recog = rec;
-    const mySeq = ++recogSeq;
-    rec.lang = "en-US";
-    rec.interimResults = true;
-    let gotFinal = false, heardAny = false, started = false, wdTimer = null, startTimer = null;
-    const clearTimers = () => { if (wdTimer) clearTimeout(wdTimer); if (startTimer) clearTimeout(startTimer); wdTimer = startTimer = null; };
-    rec.onstart = () => {
-      started = true;
-      if (startTimer) { clearTimeout(startTimer); startTimer = null; }
-      diagEvent("启动");
-    };
-    rec.onresult = e => {
-      if (!heardAny) {
-        heardAny = true;
-        if (wdTimer) { clearTimeout(wdTimer); wdTimer = null; }
-        diagEvent("听到✓");
-      }
-      let txt = "";
-      for (const res of e.results) txt += res[0].transcript;
-      heardEl.textContent = "你说的是：" + txt;
-      if (e.results[e.results.length - 1].isFinal) {
-        gotFinal = true;
-        clearTimers();
-        micBtn.classList.remove("listening", "preparing");
-        diagEvent("完成");
-        try { rec.stop(); } catch (err) {}   /* 立刻收掉本实例，别拖住下一题 */
-        stopCapture();
-        judge(txt);
-      }
-    };
-    rec.onerror = e => {
-      clearTimers();
-      micBtn.classList.remove("listening", "preparing");
-      if (state.recog === rec) stopCapture();
-      if (gotFinal) return;
-      const err = (e && e.error) || "";
-      diagEvent("err:" + (err || "?"));
-      if (!isRetry && err !== "not-allowed" && err !== "service-not-allowed") {
-        heardEl.textContent = "麦克风刚才没接上，我帮你再试一次…";
-        waitRecogEnded(900).then(() => startListening(true));
-      } else {
-        micFailLoud(err === "not-allowed" ? "麦克风被关掉了，去浏览器设置里打开；也可以用下面的拼句过关！" : "还是没听清，用下面的拼句一样过关！");
-      }
-    };
-    rec.onend = () => {
-      clearTimers();
-      micBtn.classList.remove("listening", "preparing");
-      if (state.recog === rec) stopCapture();
-      diagEvent("结束");
-      recogEnded(mySeq);
-    };
-    startCapture();                     /* iOS 上为空操作（已禁用），桌面端才真录 */
-    try { rec.start(); recogAlive = true; }
-    catch (e) {
-      clearTimers();
-      micBtn.classList.remove("listening", "preparing");
-      stopCapture();
-      recogEnded(mySeq);
-      diagEvent("start抛错");
-      if (!isRetry) {
-        heardEl.textContent = "麦克风刚才没接上，我帮你再试一次…";
-        setTimeout(() => startListening(true), 250);
-      } else {
-        micFailLoud("麦克风启动失败，用下面的拼句一样过关！");
-      }
-      return;
-    }
-    micBtn.classList.remove("preparing");
-    micBtn.classList.add("listening");
-    heardEl.textContent = "在听啦…开口说吧！";
-    /* 启动确认看门狗：2.5 秒内 onstart 没来＝这次启动被静默吞了 */
-    startTimer = setTimeout(() => {
-      if (!started && !gotFinal && state.recog === rec) {
-        diagEvent("启动无确认");
-        try { rec.stop(); } catch (e) {}
-        if (!isRetry) {
-          heardEl.textContent = "麦克风刚才没醒过来，我帮你再试一次…";
-          waitRecogEnded(900).then(() => startListening(true));
-        } else {
-          micFailLoud("麦克风没醒过来，用下面的拼句一样过关！");
-        }
-      }
-    }, 2500);
-    /* 收音看门狗：启动后 4 秒连一个 interim 结果都没有＝没收到音 */
-    wdTimer = setTimeout(() => {
-      if (!heardAny && !gotFinal && state.recog === rec && currentTurn) {
-        micDiag.watchdog++;
-        diagEvent("4秒没听到");
-        try { rec.stop(); } catch (e) {}
-        micFailLoud("好像没听到你的声音哦——再点一次麦克风试试，或者用下面的拼句过关！");
-      }
-    }, 4000);
-  } catch (e) {
-    diagEvent("异常:" + ((e && e.name) || "err"));
-    micFailLoud("麦克风出了点小问题，用下面的拼句一样过关！");
-  } finally { recogStarting = false; }
-}
-micBtn.onclick = () => {
-  /* 点击必须立刻有可见反馈，不等异步链路 */
-  micBtn.classList.add("preparing");
-  heardEl.textContent = "麦克风准备中…";
-  diagEvent("点击");
-  startListening(false);
-};
+/* （旧 SpeechRecognition 路径已于 2026-11-24 整段移除，见下方录音转写模块） */
 /* 点一下回合说明也能展开拼句兜底 */
 $("turnHint").onclick = () => chipsEl.classList.toggle("show");
 /* ---------- 分支：先帮谁，孩子说了算 ---------- */
