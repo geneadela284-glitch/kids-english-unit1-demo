@@ -1007,63 +1007,132 @@ async function judge(raw) {
   playAudio(cfg.retryAudio);
 }
 
-/* 孩子原声捕获（给鹦鹉学舌用；不可用时静默跳过） */
-let mediaRec = null, mediaChunks = [];
-function startCapture() {
-  try {
-    if (!navigator.mediaDevices || !window.MediaRecorder) return;
-    navigator.mediaDevices.getUserMedia({ audio: true }).then(stream => {
-      mediaChunks = [];
-      mediaRec = new MediaRecorder(stream);
-      mediaRec.ondataavailable = e => { if (e.data && e.data.size) mediaChunks.push(e.data); };
-      mediaRec.onstop = () => {
-        stream.getTracks().forEach(tr => tr.stop());
-        if (mediaChunks.length) {
-          if (state.lastVoiceURL) { try { URL.revokeObjectURL(state.lastVoiceURL); } catch (e) {} }
-          state.lastVoiceURL = URL.createObjectURL(new Blob(mediaChunks, { type: mediaRec.mimeType || "audio/webm" }));
-        }
-      };
-      mediaRec.start();
-    }).catch(() => {});
-  } catch (e) {}
+/* 孩子原声捕获（给鹦鹉学舌用；不可用时静默跳过）
+   手机端纪律：同一时刻只许一路录音占麦克风。停录时立刻 stop 掉 stream 的 tracks
+   （不等 onstop 慢慢收尾）；还在路上的 getUserMedia 承诺落地时先查代次、过期就
+   自释放。否则麦克风被本页自己的录音流占住，下一题的语音识别就拿不到声音——
+   真机实测「第一题能录、第二题起录不了」的原因之一。 */
+let mediaRec = null, captureStream = null, captureGen = 0;
+function releaseCapture() {
+  captureGen++;                       /* 让未落地的 getUserMedia 承诺过期自释放 */
+  const rec = mediaRec; mediaRec = null;
+  if (rec) { try { if (rec.state !== "inactive") rec.stop(); } catch (e) {} }
+  const st = captureStream; captureStream = null;
+  if (st) st.getTracks().forEach(tr => { try { tr.stop(); } catch (e) {} });
 }
-function stopCapture() { try { if (mediaRec && mediaRec.state !== "inactive") mediaRec.stop(); } catch (e) {} }
+function startCapture() {
+  releaseCapture();                   /* 先把上一路收干净，再开新的一路 */
+  if (!navigator.mediaDevices || !window.MediaRecorder) return;
+  const gen = captureGen;
+  navigator.mediaDevices.getUserMedia({ audio: true }).then(stream => {
+    if (gen !== captureGen) { stream.getTracks().forEach(tr => { try { tr.stop(); } catch (e) {} }); return; }
+    captureStream = stream;
+    const chunks = [];
+    let rec = null;
+    try { rec = new MediaRecorder(stream); } catch (e) { releaseCapture(); return; }
+    mediaRec = rec;
+    rec.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
+    rec.onstop = () => {
+      stream.getTracks().forEach(tr => { try { tr.stop(); } catch (e) {} });
+      if (captureStream === stream) captureStream = null;
+      if (mediaRec === rec) mediaRec = null;
+      if (chunks.length) {
+        if (state.lastVoiceURL) { try { URL.revokeObjectURL(state.lastVoiceURL); } catch (e) {} }
+        state.lastVoiceURL = URL.createObjectURL(new Blob(chunks, { type: rec.mimeType || "audio/webm" }));
+      }
+    };
+    try { rec.start(); } catch (e) { releaseCapture(); }
+  }).catch(() => {});
+}
+function stopCapture() { releaseCapture(); }
 
-/* 语音识别 */
-micBtn.onclick = () => {
+/* 语音识别
+   手机 Safari/WKWebView 的规矩：旧实例还没 onend 就 start 新实例，会静默失败或
+   拿不到声音。所以：每题新建实例；启动前先 stop 旧实例并等它 onend 收尾（带超时
+   兜底）；识别出最终结果立刻 stop 本实例，不留尾巴拖住下一题。出错自动重试一次，
+   再不行明确提示＋展开拼句兜底，绝不静默卡住。 */
+let recogAlive = false, recogStarting = false, recogSeq = 0, recogEndWaiters = [];
+function recogEnded(seq) {
+  if (seq === recogSeq) recogAlive = false;
+  const ws = recogEndWaiters; recogEndWaiters = [];
+  ws.forEach(f => { try { f(); } catch (e) {} });
+}
+function waitRecogEnded(ms) {
+  if (!recogAlive) return Promise.resolve();
+  return new Promise(res => {
+    let done = false;
+    const f = () => { if (!done) { done = true; res(); } };
+    recogEndWaiters.push(f);
+    setTimeout(f, ms || 900);         /* onend 迟迟不来也放行，不卡死 */
+  });
+}
+async function startListening(isRetry) {
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!SR) {
     micNote.innerHTML = "这台设备听不到声音，<br>用下面的拼句办法一样过关！";
     chipsEl.classList.add("show");
     return;
   }
-  if (state.recog) { try { state.recog.stop(); } catch (e) {} }
-  const rec = new SR();
-  state.recog = rec;
-  rec.lang = "en-US";
-  rec.interimResults = true;
-  micBtn.classList.add("listening");
-  heardEl.textContent = "在听啦…开口说吧！";
-  startCapture();
-  rec.onresult = e => {
-    let txt = "";
-    for (const res of e.results) txt += res[0].transcript;
-    heardEl.textContent = "你说的是：" + txt;
-    if (e.results[e.results.length - 1].isFinal) {
+  if (recogStarting) return;          /* 防连点叠开两路识别 */
+  recogStarting = true;
+  try {
+    if (state.recog) { try { state.recog.stop(); } catch (e) {} }
+    await waitRecogEnded(900);        /* 等旧实例彻底结束再 start（手机端关键） */
+    const rec = new SR();
+    state.recog = rec;
+    const mySeq = ++recogSeq;
+    rec.lang = "en-US";
+    rec.interimResults = true;
+    let gotFinal = false;
+    rec.onresult = e => {
+      let txt = "";
+      for (const res of e.results) txt += res[0].transcript;
+      heardEl.textContent = "你说的是：" + txt;
+      if (e.results[e.results.length - 1].isFinal) {
+        gotFinal = true;
+        micBtn.classList.remove("listening");
+        try { rec.stop(); } catch (err) {}   /* 立刻收掉本实例，别拖住下一题 */
+        stopCapture();
+        judge(txt);
+      }
+    };
+    rec.onerror = e => {
+      micBtn.classList.remove("listening");
+      if (state.recog === rec) stopCapture();
+      if (gotFinal) return;
+      const err = (e && e.error) || "";
+      if (!isRetry && err !== "not-allowed" && err !== "service-not-allowed") {
+        heardEl.textContent = "麦克风刚才没接上，我帮你再试一次…";
+        waitRecogEnded(900).then(() => startListening(true));
+      } else {
+        heardEl.textContent = err === "not-allowed" ? "麦克风被关掉了，去浏览器设置里打开；也可以用下面的拼句过关！" : "还是没听清，用下面的拼句一样过关！";
+        chipsEl.classList.add("show");
+      }
+    };
+    rec.onend = () => {
+      micBtn.classList.remove("listening");
+      if (state.recog === rec) stopCapture();
+      recogEnded(mySeq);
+    };
+    micBtn.classList.add("listening");
+    heardEl.textContent = "在听啦…开口说吧！";
+    startCapture();
+    try { rec.start(); recogAlive = true; }
+    catch (e) {
       micBtn.classList.remove("listening");
       stopCapture();
-      judge(txt);
+      recogEnded(mySeq);
+      if (!isRetry) {
+        heardEl.textContent = "麦克风刚才没接上，我帮你再试一次…";
+        setTimeout(() => startListening(true), 250);
+      } else {
+        heardEl.textContent = "麦克风启动失败，用下面的拼句一样过关！";
+        chipsEl.classList.add("show");
+      }
     }
-  };
-  rec.onerror = () => {
-    micBtn.classList.remove("listening");
-    stopCapture();
-    heardEl.textContent = "没听清，再点一次麦克风试试";
-    chipsEl.classList.add("show");
-  };
-  rec.onend = () => { micBtn.classList.remove("listening"); stopCapture(); };
-  try { rec.start(); } catch (e) { micBtn.classList.remove("listening"); }
-};
+  } finally { recogStarting = false; }
+}
+micBtn.onclick = () => { startListening(false); };
 /* 点一下回合说明也能展开拼句兜底 */
 $("turnHint").onclick = () => chipsEl.classList.toggle("show");
 /* ---------- 分支：先帮谁，孩子说了算 ---------- */
