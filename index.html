@@ -129,9 +129,11 @@
   .turn .hint b { color:#1e5c46; }
   .turn .heard { font-size:13px; color:#8a97a5; min-height:18px; margin-bottom:6px; }
   .turn .heard.got { color:#1e5c46; font-weight:700; }
+  /* 麦克风/网络出错时的大字提示：孩子一眼能看懂，不用英文报错吓人 */
+  .turn .heard.loud { font-size:16px; font-weight:800; color:#c0392b; line-height:1.5; }
   .microw { display:flex; align-items:center; gap:12px; }
   .mic {
-    width:64px; height:64px; border-radius:50%; border:none; flex:none;
+    width:64px; height:64px; border-radius:50%; border:none; flex:none; position:relative;
     background:#ffb52e; font-size:28px; cursor:pointer;
     box-shadow:0 4px 0 #d18f12, 0 0 0 5px rgba(255,181,46,.35), 0 8px 18px rgba(0,0,0,.25);
     animation:micIdle 2.6s ease-in-out infinite;
@@ -142,14 +144,19 @@
     50%     { transform:scale(1.045); }
   }
   .mic:active { transform:translateY(2px); box-shadow:0 2px 0 #d18f12; }
-  .mic.listening { background:#ff6b5e; animation:pulse 1s infinite; }
+  .mic.listening { background:#ff6b5e; animation:micIdle 2.6s ease-in-out infinite; }
+  /* 录音中扩散环走 transform+opacity（合成层）：旧版动 box-shadow 每帧重绘，与待机呼吸同一理由换掉 */
+  .mic.listening::after {
+    content:""; position:absolute; inset:-6px; border-radius:50%; pointer-events:none;
+    border:3px solid rgba(255,107,94,.55); animation:micRing 1s ease-out infinite;
+  }
+  @keyframes micRing { 0%{transform:scale(.96); opacity:.9;} 100%{transform:scale(1.3); opacity:0;} }
   .mic.preparing { background:#ffe1a8; animation:none; transform:scale(.93); }
-  @keyframes pulse { 0%{box-shadow:0 0 0 0 rgba(255,107,94,.5);} 100%{box-shadow:0 0 0 18px rgba(255,107,94,0);} }
   .micnote { font-size:12px; color:#7a6a45; line-height:1.5; }
   .micdiag { font-size:10px; color:#b9c2c9; margin-top:5px; min-height:13px; letter-spacing:.2px; }
   .volbar { height:8px; width:180px; max-width:70%; margin:7px auto 0; background:#edf1ee; border-radius:99px; overflow:hidden; opacity:0; transition:opacity .2s; }
   .volbar.show { opacity:1; }
-  .volbar i { display:block; height:100%; width:0%; background:linear-gradient(90deg,#57c98a,#ffd23e,#ff6b5e); border-radius:99px; transition:width .09s linear; }
+  .volbar i { display:block; height:100%; width:100%; transform:scaleX(0); transform-origin:left center; background:linear-gradient(90deg,#57c98a,#ffd23e,#ff6b5e); border-radius:99px; transition:transform .09s linear; }
   .chips { margin-top:10px; display:none; }
   .chips.show { display:block; }
   .chips .lbl { font-size:12px; color:#7a6a45; margin-bottom:6px; }
@@ -245,7 +252,7 @@
   .game-score { font-size:16px; font-weight:900; color:#b97a00; white-space:nowrap; }
   .game-combo { color:#ff6b5e; font-size:13px; }
   .timerbar { height:10px; background:#e8dcbb; border-radius:99px; margin:10px 0 4px; overflow:hidden; }
-  .timerbar i { display:block; height:100%; width:100%; background:linear-gradient(90deg,#1e9e75,#ffb52e,#ff6b5e); border-radius:99px; }
+  .timerbar i { display:block; height:100%; width:100%; transform-origin:left center; background:linear-gradient(90deg,#1e9e75,#ffb52e,#ff6b5e); border-radius:99px; }
   .timer-num { font-size:12px; color:#a08c5f; font-weight:700; text-align:right; min-height:15px; }
   .game-prompt { display:flex; align-items:center; gap:10px; margin:8px 0 10px; }
   .game-sealtag { font-size:12px; font-weight:800; color:#6a34b0; background:#f7f0ff; border:2px solid #c9a7eb; border-radius:999px; padding:4px 10px; display:none; }
@@ -296,6 +303,21 @@
   .seal-cell.free { border-color:#ffb52e; background:#fff6dd; }
   .seal-cell.free .sc-status { color:#b97a00; }
   .book-note { font-size:12px; color:#7a6a45; line-height:1.6; margin-top:12px; }
+  /* 家长报告：给大人看的，简洁大字、无动画（性能优先） */
+  .rep-sub { font-size:13px; color:#7a6a45; line-height:1.6; margin-bottom:4px; }
+  .rep-summary { font-size:15px; font-weight:800; color:#1e5c46; background:#eef7f1; border:2px solid #bfe3d2; border-radius:12px; padding:9px 12px; margin:8px 0 2px; line-height:1.6; }
+  .rep-sec { font-size:15px; font-weight:900; color:#1e5c46; margin:16px 0 8px; }
+  .rep-row { display:flex; align-items:center; gap:10px; background:#fff; border:2px solid #e2d5ae; border-radius:12px; padding:9px 11px; margin-bottom:7px; }
+  .rep-main { flex:1; min-width:0; }
+  .rep-en { font-size:16px; font-weight:800; color:#21312b; line-height:1.35; }
+  .rep-zh { font-size:12px; color:#7a6a45; margin-top:1px; }
+  .rep-status { flex:none; font-size:12px; font-weight:800; border-radius:999px; padding:4px 10px; white-space:nowrap; }
+  .rep-status.st-good { background:#dff5ea; color:#14614a; }
+  .rep-status.st-mid { background:#fff3d6; color:#8a5f00; }
+  .rep-status.st-low { background:#ffe9e6; color:#b03a2e; }
+  .rep-status.st-none { background:#eef1ee; color:#8a97a5; }
+  .rep-play { flex:none; border:none; cursor:pointer; background:#6a34b0; color:#fff; font-size:13px; font-weight:800; border-radius:999px; padding:8px 12px; }
+  .rep-play:active { background:#4c2a9e; }
   /* 贴纸到手 */
   .award {
     position:absolute; inset:0; z-index:11; display:flex; flex-direction:column;
@@ -407,11 +429,20 @@
     <div class="book hidden" id="book">
       <div class="book-head"><span>📖 我的贴纸册</span><button class="btn ghost" id="bookClose">关上</button></div>
       <button class="btn go hidden" id="bookAct2Btn" style="width:100%;margin-bottom:4px;">🎬 开始第二幕：名字保卫战</button>
+      <button class="btn go" id="bookReportBtn" style="width:100%;margin-bottom:4px;background:#6a34b0;box-shadow:0 3px 0 #4c2a9e;">👨‍👩‍👧 给家长看：学习报告</button>
       <div class="book-sec">🏅 贴纸收藏</div>
       <div class="sticker-grid" id="stickerGrid"></div>
       <div class="book-sec">📕 封印本进度（答对 3 次解封）</div>
       <div class="seal-grid" id="sealGrid"></div>
       <p class="book-note">被封印的词会在「听音抢答」里回来找你，答对一次亮一颗星，集满 3 颗就解封啦。</p>
+    </div>
+
+    <div class="book hidden" id="report" style="z-index:14;">
+      <div class="book-head"><span>👨‍👩‍👧 家长报告</span><button class="btn ghost" id="reportClose">关上</button></div>
+      <div class="rep-sub">第 1 集《开学第一天》· 七上 Unit 1 —— 孩子在每一幕里开口说的句子和单词，都记在这里；带 ▶ 的可以回放孩子最近一次答对时的原声。</div>
+      <div class="rep-summary" id="repSummary"></div>
+      <div id="reportBody"></div>
+      <p class="book-note">🔒 孩子的录音只存在这台设备上，不会上传到任何地方；换设备或清掉浏览器数据就找不回来了。</p>
     </div>
 
     <div class="award hidden" id="award">
@@ -450,6 +481,7 @@
       <h1>🎉 第二幕完成！</h1>
       <p id="endText2">名字保卫战大获全胜：点名答到、全名救回、词卡全守住——你就是名字大英雄！</p>
       <button class="big" id="act2AgainBtn">再演一遍第二幕</button>
+      <button class="big alt" id="reportBtn2">👨‍👩‍👧 给家长看报告</button>
       <button class="big alt" id="backToAct1Btn">↩ 回第一幕</button>
       <button class="big alt" id="act2GameBtn">🎮 再玩听音抢答</button>
       <p style="margin-top:14px;font-size:12px;color:#bdb493;">下一集预告：把朋友介绍给 Mr Smith 老师（第三幕）</p>
@@ -501,8 +533,8 @@ let save = loadSave();
 function loadSave() {
   try {
     const s = JSON.parse(localStorage.getItem(SAVE_KEY) || "{}");
-    return { sticker1: !!s.sticker1, sticker2: !!s.sticker2, seal: s.seal || {}, best: s.best || 0 };
-  } catch (e) { return { sticker1: false, sticker2: false, seal: {}, best: 0 }; }
+    return { sticker1: !!s.sticker1, sticker2: !!s.sticker2, seal: s.seal || {}, best: s.best || 0, turns: s.turns || {} };
+  } catch (e) { return { sticker1: false, sticker2: false, seal: {}, best: 0, turns: {} }; }
 }
 function persist() { try { localStorage.setItem(SAVE_KEY, JSON.stringify(save)); } catch (e) {} }
 
@@ -537,6 +569,8 @@ function showSeg(key) {
   const v = vids[key];
   if (activeVid === v) return v;
   const old = activeVid;
+  /* 进第二幕时释放过的第一幕片段：源还在本地 Blob 里，用到时秒挂回来，不走网络 */
+  if (!v.src) { const bu = blobURLs["clips/" + key]; if (bu) v.src = bu; }
   if (v.readyState === 0 && v.src) { try { v.load(); } catch (e) {} }
   v.classList.add("on");
   activeVid = v;
@@ -759,16 +793,19 @@ function phaseRender(ph) {
   if (ph.name === "act1") {
     const fill = $("loadFill"), txt = $("loadTxt");
     if (fill) fill.style.width = ph.pctShown + "%";
-    if (txt && !assetsReady) txt.textContent = "正在把动画装进口袋… " + ph.done + "/" + ph.jobs.length + " 个 · " + mb(ph.bytesGot) + "MB";
+    if (txt && !assetsReady) txt.textContent = navigator.onLine === false ? "📶 网络断啦——别关页面，网络回来会自动接着装…" : "正在把动画装进口袋… " + ph.done + "/" + ph.jobs.length + " 个 · " + mb(ph.bytesGot) + "MB";
     renderFailBox(ph, "loadFail", "loadFailList");
   } else {
     const fill = $("act2Fill"), txt = $("act2LoadTxt");
     if (fill) fill.style.width = ph.pctShown + "%";
-    if (txt && !act2Primed) txt.textContent = "正在准备第二幕… " + ph.done + "/" + ph.jobs.length + " 个 · " + mb(ph.bytesGot) + "MB";
+    if (txt && !act2Primed) txt.textContent = navigator.onLine === false ? "📶 网络断啦——别关页面，网络回来会自动接着装…" : "正在准备第二幕… " + ph.done + "/" + ph.jobs.length + " 个 · " + mb(ph.bytesGot) + "MB";
     renderFailBox(ph, "act2Fail", "act2FailList");
   }
 }
 async function runPhaseJobs(ph, concurrency) {
+  /* 同一幕不许两轮下载并发（断网恢复的自动重试可能与原流程撞车）：后到者排队等前一轮收尾 */
+  if (ph.running) { while (ph.running) await sleep(300); }
+  ph.running = true;
   const queue = ph.jobs.filter(j => j.state !== "ok");
   async function worker() {
     while (queue.length) {
@@ -796,6 +833,7 @@ async function runPhaseJobs(ph, concurrency) {
   await Promise.all(ws);
   ph.done = ph.jobs.length;
   ph.settled = true;
+  ph.running = false;
   phaseRender(ph);
   ph.resolve();
 }
@@ -847,6 +885,40 @@ $("act2RetryBtn").onclick = async () => {
     playAct2();
   }
 };
+/* 断网自愈：加载途中网络断了，失败文件会列名＋可手动重试（已有）；网络一回来，
+   这里自动把失败的接着装完，不用孩子动手、更不许白屏干等 */
+let healing = false;
+async function healFailed() {
+  if (healing) return;
+  healing = true;
+  try {
+    if (phase1.failed().length) {
+      phase1.jobs.forEach(j => { if (j.state === "fail") j.state = "wait"; });
+      await runPhaseJobs(phase1, 4);
+      createPhaseAudios(ACT1_AUDIO);
+      phaseRender(phase1);
+      if (assetsReady && !phase1.failed().length && !$("startVeil").classList.contains("hidden"))
+        $("loadTxt").textContent = "网络回来啦，装好啦，点「开始上课」！";
+    }
+    if (phase2.failed().length) {
+      phase2.jobs.forEach(j => { if (j.state === "fail") j.state = "wait"; });
+      await runPhaseJobs(phase2, 3);
+      createPhaseAudios(ACT2_AUDIO);
+      markAct2Ready();
+      phaseRender(phase2);
+      if (act2Ready && !$("act2LoadVeil").classList.contains("hidden")) {
+        $("act2LoadVeil").classList.add("hidden");
+        playAct2();
+      }
+    }
+  } catch (e) {}
+  healing = false;
+}
+window.addEventListener("online", healFailed);
+window.addEventListener("offline", () => {
+  if (!assetsReady) $("loadTxt").textContent = "📶 网络好像断啦——别关页面，网络回来会自动接着装…";
+  if (!$("act2LoadVeil").classList.contains("hidden")) $("act2LoadTxt").textContent = "📶 网络好像断啦——别关页面，网络回来会自动接着装…";
+});
 /* 点按手势里把解码器唤醒：消除真机上每句配音首次播放的启动延迟。
    改成分批＋逐个点火：旧版在一次点击里同时点火全部音频和 10 路视频，
    真机上几十路解码器集体抢占，是全程顿挫的源头之一。现在音频每批 6 个、
@@ -887,6 +959,16 @@ function releaseAct1Audios() {
     if (!a) return;
     try { a.pause(); a.removeAttribute("src"); a.load(); } catch (e) {}
     delete AC[f];
+  });
+}
+/* 进第二幕后释放第一幕片段（seg2–seg6）的解码器：卸掉 src 让浏览器回收解码缓冲，
+   Blob 本体留在 blobURLs 里，回第一幕时 showSeg 按需秒挂，不走网络。
+   seg1 第二幕还要当桥和反应底，seg7–seg11 是本幕正片，都不动 */
+function releaseAct1Vids() {
+  ["seg2", "seg3", "seg4", "seg5", "seg6"].forEach(k => {
+    const v = vids[k];
+    if (!v || v === activeVid || !v.src) return;
+    try { v.pause(); v.removeAttribute("src"); v.load(); } catch (e) {}
   });
 }
 
@@ -1287,6 +1369,27 @@ const TURNS = {
 function cap(s) { return s ? s.charAt(0).toUpperCase() + s.slice(1) : s; }
 
 let currentTurn = null, turnResolve = null, hintLevel = 0;
+/* 家长报告的游玩记录：本回合是怎么答对的——语音还是拼句、试了几次、用没用提示。
+   turnVia 由两个 judge 入口各自打标：uploadAndJudge 打 voice、拼句按钮打 chips；
+   pendingVoiceBlob 是本回合最近一次语音录音，只有答对的那段才存进报告（IndexedDB） */
+let turnVia = "voice";
+let pendingVoiceBlob = null;
+function turnStatusOf(via, attempts, hint, rescued) {
+  if (rescued) return { label: "还没练稳，再练练", rank: 1 };
+  if (via === "chips") return { label: "拼句说出来", rank: 2 };
+  if (attempts === 0 && hint === 0) return { label: "一次答对 ⭐", rank: 4 };
+  if (hint > 0) return { label: "用了提示后答对", rank: 3 };
+  return { label: "多试几次后答对", rank: 3 };
+}
+function recordTurn(cfg, rescued) {
+  const st = turnStatusOf(turnVia, state.attempts, hintLevel, rescued);
+  const prev = save.turns[cfg.key];
+  /* 报告记最好成绩：重玩时玩得差一点，不把已经练稳的句子打回低档 */
+  if (!prev || st.rank >= prev.rank) {
+    save.turns[cfg.key] = { label: st.label, rank: st.rank, attempts: state.attempts, hint: hintLevel, via: turnVia, rescued: !!rescued, ts: Date.now() };
+    persist();
+  }
+}
 function childTurn(key) {
   return new Promise(resolve => {
     currentTurn = TURNS[key];
@@ -1295,12 +1398,13 @@ function childTurn(key) {
     diagTurn(key);
     turnResolve = resolve;
     state.attempts = 0;
+    pendingVoiceBlob = null;
     state.built = [];
     state.lastModelAudio = currentTurn.model;
     builtEl.textContent = "";
     $("sayBuilt").disabled = true;
     heardEl.textContent = "点麦克风，开口说英语";
-    heardEl.classList.remove("got");
+    heardEl.classList.remove("got", "loud");
     micNote.innerHTML = "点麦克风开始说，<br>说完再点一下 🎤";
     $("turnHint").innerHTML = currentTurn.hint;
     /* 提示系统复位：骨架卡回空白态，提示棒三星清空 */
@@ -1351,7 +1455,7 @@ function renderChips() {
 $("clearBuilt").onclick = () => {
   state.built = []; builtEl.textContent = ""; $("sayBuilt").disabled = true; renderChips();
 };
-$("sayBuilt").onclick = () => judge(state.built.join(" ").toLowerCase());
+$("sayBuilt").onclick = () => { turnVia = "chips"; judge(state.built.join(" ").toLowerCase()); };
 
 async function judge(raw) {
   if (!currentTurn) return;
@@ -1362,6 +1466,11 @@ async function judge(raw) {
   if (r.ok) {
     heardEl.textContent = "听到啦：" + (raw.length > 30 ? raw.slice(0, 30) + "…" : raw);
     heardEl.classList.add("got");
+    heardEl.classList.remove("loud");
+    /* 家长报告落账：掌握状态＋（语音答对时）这段原声存进本机 IndexedDB */
+    recordTurn(cfg, false);
+    if (turnVia === "voice" && pendingVoiceBlob) VoiceDB.put(cfg.key, pendingVoiceBlob);
+    pendingVoiceBlob = null;
     if (cfg.slot === "name" && cfg.key === "name") state.name = r.value;
     lightSlot(cfg.slot, cfg.key === "name2" ? state.name : (r.value || cfg.slotText || "✓"), false);
     const cb = cfg.onOk;
@@ -1383,6 +1492,7 @@ async function judge(raw) {
     return;
   }
   state.attempts++;
+  pendingVoiceBlob = null;   /* 没答对的录音不进报告 */
   if (state.attempts >= 2) {
     /* 第二次没说对：随机抽一种搞笑圆场（拉链卡住/网球跑掉…），剧情照走，不卡孩子 */
     heardEl.textContent = "没关系，听听大家怎么说——";
@@ -1409,6 +1519,7 @@ async function judge(raw) {
     const defaults = { name: state.name, name2: state.name, age: "12 岁", from: "China", class: "Class 1, Grade 7" };
     lightSlot(cfg.slot, defaults[cfg.key] || cfg.slotText || "✓", true);
     if (cfg.onOk) cfg.onOk();
+    recordTurn(cfg, true);   /* 家长报告落账：这一句是老师带着过的，标「还没练稳」 */
     res(true);
     return;
   }
@@ -1460,23 +1571,23 @@ function startMeter(stream) {
       an.getByteTimeDomainData(data);
       let peak = 0;
       for (let i = 0; i < data.length; i++) { const v = Math.abs(data[i] - 128) / 128; if (v > peak) peak = v; }
-      fill.style.width = Math.min(100, Math.round(peak * 150)) + "%";
+      fill.style.transform = "scaleX(" + Math.min(1, peak * 1.5).toFixed(3) + ")";
     }, 100);
   } catch (e) { fake = true; }
   if (fake) {
-    meterTimer = setInterval(() => { t += 0.35; fill.style.width = (45 + Math.round(35 * Math.sin(t))) + "%"; }, 100);
+    meterTimer = setInterval(() => { t += 0.35; fill.style.transform = "scaleX(" + ((45 + 35 * Math.sin(t)) / 100).toFixed(3) + ")"; }, 100);
   }
 }
 function stopMeter() {
   if (meterTimer) { clearInterval(meterTimer); meterTimer = null; }
   if (meterCtx) { try { meterCtx.close(); } catch (e) {} meterCtx = null; }
   $("volBar").classList.remove("show");
-  $("volFill").style.width = "0%";
+  $("volFill").style.transform = "scaleX(0)";
 }
 function startAnswerRecording() {
   if (recBusy) return;
   if (!navigator.mediaDevices || !window.MediaRecorder) {
-    micFailLoud("这台设备录不了音，用下面的拼句一样过关！");
+    micFailLoud("🎤 这台设备录不了音，用下面的拼句一样过关！");
     return;
   }
   recBusy = true;
@@ -1491,7 +1602,7 @@ function startAnswerRecording() {
     answerStream = stream;
     const chunks = [];
     let rec = null;
-    try { rec = new MediaRecorder(stream); } catch (e) { releaseAnswerStream(); recBusy = false; micFailLoud("录音没启动起来，用下面的拼句一样过关！"); return; }
+    try { rec = new MediaRecorder(stream); } catch (e) { releaseAnswerStream(); recBusy = false; micFailLoud("🎤 录音没启动起来，用下面的拼句一样过关！"); return; }
     answerRec = rec;
     rec.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
     rec.onstop = () => {
@@ -1501,13 +1612,13 @@ function startAnswerRecording() {
       micBtn.classList.remove("listening");
       if (gen !== recGen) { recBusy = false; return; }   /* 被 teardown 取消：不上传、不判定 */
       const blob = new Blob(chunks, { type: rec.mimeType || "audio/mp4" });
-      if (!blob.size) { recBusy = false; micFailLoud("刚才没录到声音——再点一次麦克风试试，或者用下面的拼句过关！"); return; }
+      if (!blob.size) { recBusy = false; micFailLoud("🔊 刚才没录到声音——再点一次麦克风试试，或者用下面的拼句过关！"); return; }
       /* 判定录音同时存为鹦鹉真声素材（全平台统一） */
       if (state.lastVoiceURL) { try { URL.revokeObjectURL(state.lastVoiceURL); } catch (e) {} }
       state.lastVoiceURL = URL.createObjectURL(blob);
       uploadAndJudge(blob).finally(() => { recBusy = false; });
     };
-    try { rec.start(); } catch (e) { releaseAnswerStream(); recBusy = false; micFailLoud("录音没启动起来，用下面的拼句一样过关！"); return; }
+    try { rec.start(); } catch (e) { releaseAnswerStream(); recBusy = false; micFailLoud("🎤 录音没启动起来，用下面的拼句一样过关！"); return; }
     recStartStamp = Date.now();
     micBtn.classList.remove("preparing");
     micBtn.classList.add("listening");
@@ -1525,7 +1636,7 @@ function startAnswerRecording() {
     recBusy = false;
     micBtn.classList.remove("preparing");
     diagEvent("err:麦克风权限");
-    micFailLoud("麦克风被关掉了，去浏览器设置里打开；也可以用下面的拼句过关！");
+    micFailLoud("🎤 麦克风被关掉了，去浏览器设置里打开它；也可以用下面的拼句过关！");
   });
 }
 function stopAnswerRecording() {
@@ -1552,17 +1663,19 @@ async function uploadAndJudge(blob) {
     micBtn.classList.remove("preparing");
     if (!text) {
       diagEvent("转写空");
-      micFailLoud("好像没听到你说话哦——大声一点再试一次，或者用下面的拼句过关！");
+      micFailLoud("🔊 好像没听到你说话哦——大声一点再试一次，或者用下面的拼句过关！");
       return;
     }
     diagEvent("转写✓");
     heardEl.textContent = "你说的是：" + text;
+    turnVia = "voice";
+    pendingVoiceBlob = blob;   /* 先攥着，judge 答对了才存进家长报告 */
     judge(text);
   } catch (e) {
     clearTimeout(to);
     micBtn.classList.remove("preparing");
     diagEvent(e && e.name === "AbortError" ? "上传超时" : "上传失败");
-    micFailLoud("网络有点慢，没听清——再点一次麦克风试试，或者用下面的拼句过关！");
+    micFailLoud("📶 网络有点慢，刚才没听清——再点一次麦克风试试，或者用下面的拼句过关！");
   }
 }
 micBtn.onclick = () => {
@@ -1606,10 +1719,11 @@ function silenceOutputs() {
   for (const n in SFX) { const a = SFX[n]; try { if (!a.paused) a.pause(); } catch (e) {} }
   if (typeof parrotAudio !== "undefined" && parrotAudio) { try { parrotAudio.pause(); } catch (e) {} }
 }
-/* 麦克风链路失败时的统一落点：可见提示＋展开拼句，绝不静默 */
+/* 麦克风链路失败时的统一落点：大字＋图标的可见提示＋展开拼句，绝不静默、不用英文报错 */
 function micFailLoud(msg) {
   micBtn.classList.remove("listening", "preparing");
   heardEl.textContent = msg;
+  heardEl.classList.add("loud");
   chipsEl.classList.add("show");
 }
 
@@ -1713,7 +1827,7 @@ function startGameRound0() {
   clearInterval(g.timer);
   g.timer = setInterval(() => {
     const left = Math.max(0, g.deadline - Date.now());
-    $("timerFill").style.width = (left / (GAME_SECONDS * 1000) * 100) + "%";
+    $("timerFill").style.transform = "scaleX(" + (left / (GAME_SECONDS * 1000)).toFixed(4) + ")";
     $("timerNum").textContent = "还剩 " + Math.ceil(left / 1000) + " 秒";
     if (left <= 0) endGame();
   }, 100);
@@ -1847,6 +1961,114 @@ function renderBook() {
 }
 $("bookBtn").onclick = () => { renderBook(); $("book").classList.remove("hidden"); };
 $("bookClose").onclick = () => $("book").classList.add("hidden");
+
+/* ---------- 家长报告：词条级掌握情况 + 孩子原声（只存本机） ----------
+   掌握状态来自 save.turns（judge 落账）；原声存 IndexedDB（localStorage 放不下音频），
+   每回合只留最近一次答对的那段。IDB 不可用/存失败一律静默跳过，绝不打断游玩 */
+const VoiceDB = {
+  db: null,
+  open() {
+    if (VoiceDB.db) return Promise.resolve(true);
+    return new Promise(res => {
+      if (!window.indexedDB) return res(false);
+      try {
+        const rq = indexedDB.open("kidsEnglishEp1", 1);
+        rq.onupgradeneeded = () => { try { rq.result.createObjectStore("voices"); } catch (e) {} };
+        rq.onsuccess = () => { VoiceDB.db = rq.result; res(true); };
+        rq.onerror = () => res(false);
+      } catch (e) { res(false); }
+    });
+  },
+  async put(key, blob) {
+    try {
+      if (!(await VoiceDB.open())) return;
+      VoiceDB.db.transaction("voices", "readwrite").objectStore("voices").put(blob, key);
+    } catch (e) {}
+  },
+  async get(key) {
+    if (!(await VoiceDB.open())) return null;
+    return new Promise(res => {
+      try {
+        const rq = VoiceDB.db.transaction("voices", "readonly").objectStore("voices").get(key);
+        rq.onsuccess = () => res(rq.result || null);
+        rq.onerror = () => res(null);
+      } catch (e) { res(null); }
+    });
+  },
+  async keys() {
+    if (!(await VoiceDB.open())) return [];
+    return new Promise(res => {
+      try {
+        const rq = VoiceDB.db.transaction("voices", "readonly").objectStore("voices").getAllKeys();
+        rq.onsuccess = () => res(rq.result || []);
+        rq.onerror = () => res([]);
+      } catch (e) { res([]); }
+    });
+  }
+};
+const REPORT_ITEMS = [
+  { key: "name", act: 1, en: "My name is …", zh: "说出自己的名字" },
+  { key: "name2", act: 1, en: "My name is …", zh: "帮 Peter 解书包时再说一次名字" },
+  { key: "age", act: 1, en: "I'm … years old.", zh: "说出自己的年龄" },
+  { key: "from", act: 1, en: "I'm from …", zh: "说自己来自哪里" },
+  { key: "class", act: 1, en: "I'm in Class 1, Grade 7.", zh: "说自己在哪个班" },
+  { key: "here", act: 2, en: "I'm here!", zh: "点名答到" },
+  { key: "fullname", act: 2, en: "Wang Peter", zh: "说出 Peter 的全名（姓＋名）" },
+  { key: "thatme", act: 2, en: "That's me!", zh: "认领自己的名字牌" },
+  { key: "twin", act: 2, en: "twin", zh: "单词：双胞胎" },
+  { key: "band", act: 2, en: "band", zh: "单词：乐队" },
+  { key: "guitar", act: 2, en: "guitar", zh: "单词：吉他" },
+  { key: "tennis", act: 2, en: "tennis", zh: "单词：网球" },
+  { key: "hobby", act: 2, en: "hobby", zh: "单词：爱好" }
+];
+let repAudio = null, repAudioURL = null;
+function getRepAudio() {
+  if (!repAudio) { repAudio = new Audio(); window.__repAudio = repAudio; }
+  return repAudio;
+}
+function stopRepAudio() {
+  if (repAudio) { try { repAudio.pause(); } catch (e) {} }
+  if (repAudioURL) { try { URL.revokeObjectURL(repAudioURL); } catch (e) {} repAudioURL = null; }
+}
+async function playRepVoice(key, btn) {
+  const blob = await VoiceDB.get(key);
+  if (!blob) { if (btn) btn.textContent = "▶ 没存下"; return; }
+  const a = getRepAudio();
+  if (repAudioURL) { try { URL.revokeObjectURL(repAudioURL); } catch (e) {} }
+  repAudioURL = URL.createObjectURL(blob);
+  a.src = repAudioURL;
+  a.play().catch(() => {});
+}
+async function renderReport() {
+  const voiceKeys = new Set(await VoiceDB.keys());
+  const stCls = r => !r ? "st-none" : r.rank >= 4 ? "st-good" : r.rank >= 2 ? "st-mid" : "st-low";
+  let done = 0, clean = 0;
+  const rowFor = it => {
+    const r = save.turns[it.key];
+    if (r) { done++; if (r.rank >= 4) clean++; }
+    return "<div class='rep-row' data-key='" + it.key + "'><div class='rep-main'><div class='rep-en'>" + it.en + "</div><div class='rep-zh'>" + it.zh + "</div></div>" +
+      "<span class='rep-status " + stCls(r) + "'>" + (r ? r.label : "还没练到") + "</span>" +
+      (voiceKeys.has(it.key) ? "<button class='rep-play' data-k='" + it.key + "'>▶ 原声</button>" : "") + "</div>";
+  };
+  let html = "<div class='rep-sec'>🎬 第一幕 · 自我介绍</div>" + REPORT_ITEMS.filter(i => i.act === 1).map(rowFor).join("");
+  html += "<div class='rep-sec'>🎬 第二幕 · 名字保卫战</div>" + REPORT_ITEMS.filter(i => i.act === 2).map(rowFor).join("");
+  html += "<div class='rep-sec'>📕 封印本（听音抢答里认错的词）</div>";
+  html += WORDS.map(w => {
+    const s = save.seal[w.id];
+    let cls = "st-none", txt = "✨ 还没被封印过";
+    if (s && s.sealed) { cls = "st-low"; txt = "🔒 封印中 · 解封进度 ⭐ " + s.stars + "/3"; }
+    else if (s && s.ever) { cls = "st-good"; txt = "🔓 已解封"; }
+    return "<div class='rep-row'><div class='rep-main'><div class='rep-en'>" + w.icon + " " + w.en + "</div></div><span class='rep-status " + cls + "'>" + txt + "</span></div>";
+  }).join("");
+  $("reportBody").innerHTML = html;
+  $("repSummary").textContent = "本课共 " + REPORT_ITEMS.length + " 个开口任务，已完成 " + done + " 个，其中一次答对 " + clean + " 个。" +
+    (done < REPORT_ITEMS.length ? "剩下的下次接着练。" : "全部完成了，太棒了！");
+  $("reportBody").querySelectorAll(".rep-play").forEach(b => { b.onclick = () => playRepVoice(b.dataset.k, b); });
+}
+async function openReport() { stopRepAudio(); await renderReport(); $("report").classList.remove("hidden"); }
+$("bookReportBtn").onclick = openReport;
+$("reportBtn2").onclick = openReport;
+$("reportClose").onclick = () => { stopRepAudio(); $("report").classList.add("hidden"); };
 async function awardSticker() {
   if (save.sticker1) return;
   save.sticker1 = true; persist(); renderBook();
@@ -2025,6 +2247,7 @@ async function playAct2() {
 
   /* 桥：Mimi 招呼进教室 */
   await speakOver("seg1", "Mimi", "Quick! Into the classroom! Mr Smith is calling the roll!", "mimi-act2-intro", 0, 5.0);
+  releaseAct1Vids(); /* 桥已过，第一幕片段的解码器可以还给系统了 */
 
   /* 1 · Mr Smith 点名：Peter、Lulu 先答到，最后点到孩子 */
   await playSegment("seg7", [
