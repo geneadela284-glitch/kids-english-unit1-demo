@@ -309,7 +309,7 @@
 <body>
 <div class="app">
   <div class="topbar">
-    <div class="ttl"><span>开学第一天 · 第 1 集 <small>七上 Unit 1《You and Me》第一幕</small></span><button id="bookBtn">📖 贴纸册<span id="sealBadge"></span></button></div>
+    <div class="ttl"><span id="ttlMain">开学第一天 · 第 1 集 <small>七上 Unit 1《You and Me》第一幕</small></span><button id="bookBtn">📖 贴纸册<span id="sealBadge"></span></button></div>
     <div class="card">
       <div class="slot" id="slot-name"><div class="k">NAME 名字</div><div class="v">?</div></div>
       <div class="slot" id="slot-age"><div class="k">AGE 年龄</div><div class="v">?</div></div>
@@ -398,6 +398,7 @@
 
     <div class="book hidden" id="book">
       <div class="book-head"><span>📖 我的贴纸册</span><button class="btn ghost" id="bookClose">关上</button></div>
+      <button class="btn go hidden" id="bookAct2Btn" style="width:100%;margin-bottom:4px;">🎬 开始第二幕：名字保卫战</button>
       <div class="book-sec">🏅 贴纸收藏</div>
       <div class="sticker-grid" id="stickerGrid"></div>
       <div class="book-sec">📕 封印本进度（答对 3 次解封）</div>
@@ -406,9 +407,9 @@
     </div>
 
     <div class="award hidden" id="award">
-      <div class="award-badge">🏫</div>
+      <div class="award-badge" id="awardBadge">🏫</div>
       <div class="award-title">🎉 新贴纸到手！</div>
-      <div class="award-name">校门口纪念贴 · 第 1 集</div>
+      <div class="award-name" id="awardName">校门口纪念贴 · 第 1 集</div>
       <div class="award-sub">已经放进你的贴纸册啦，点右上角 📖 能看到</div>
     </div>
 
@@ -416,6 +417,7 @@
       <h1>🎬 开学第一天 · 第 1 集</h1>
       <p>Mimi 老师和新同学都在校门口等你。<br>动画演到你的台词会停下来——开口说，剧情才继续！<br>先帮谁、集贴纸，都由你决定。</p>
       <button class="big" id="startBtn" disabled>加载中…</button>
+      <button class="big alt hidden" id="act2DirectBtn">🎬 直接去第二幕：名字保卫战</button>
       <div class="loadwrap" id="loadWrap">
         <div class="loadbar"><i id="loadFill"></i></div>
         <div class="loadtxt" id="loadTxt">正在把动画装进口袋…</div>
@@ -425,9 +427,19 @@
     <div class="veil hidden" id="endVeil">
       <h1>🎉 第一幕完成！</h1>
       <p id="endText">你的个人信息卡集满啦：名字、年龄、来自哪里、班级——全是你自己开口说出来的！</p>
-      <button class="big" id="againBtn">再演一遍</button>
+      <button class="big hidden" id="act2Btn">▶ 第二幕：名字保卫战</button>
+      <button class="big alt" id="againBtn">再演一遍第一幕</button>
       <button class="big alt" id="gameReplayBtn">🎮 再玩听音抢答</button>
-      <p style="margin-top:14px;font-size:12px;color:#bdb493;">下一集预告：公告板前的词卡大冒险（第二幕）</p>
+      <p style="margin-top:14px;font-size:12px;color:#bdb493;">第二幕在教室里：Mr Smith 点名、鹦鹉大闹名字牌！</p>
+    </div>
+
+    <div class="veil hidden" id="endVeil2">
+      <h1>🎉 第二幕完成！</h1>
+      <p id="endText2">名字保卫战大获全胜：点名答到、全名救回、词卡全守住——你就是名字大英雄！</p>
+      <button class="big" id="act2AgainBtn">再演一遍第二幕</button>
+      <button class="big alt" id="backToAct1Btn">↩ 回第一幕</button>
+      <button class="big alt" id="act2GameBtn">🎮 再玩听音抢答</button>
+      <p style="margin-top:14px;font-size:12px;color:#bdb493;">下一集预告：把朋友介绍给 Mr Smith 老师（第三幕）</p>
     </div>
   </div>
 </div>
@@ -461,8 +473,8 @@ let save = loadSave();
 function loadSave() {
   try {
     const s = JSON.parse(localStorage.getItem(SAVE_KEY) || "{}");
-    return { sticker1: !!s.sticker1, seal: s.seal || {}, best: s.best || 0 };
-  } catch (e) { return { sticker1: false, seal: {}, best: 0 }; }
+    return { sticker1: !!s.sticker1, sticker2: !!s.sticker2, seal: s.seal || {}, best: s.best || 0 };
+  } catch (e) { return { sticker1: false, sticker2: false, seal: {}, best: 0 }; }
 }
 function persist() { try { localStorage.setItem(SAVE_KEY, JSON.stringify(save)); } catch (e) {} }
 
@@ -479,7 +491,9 @@ function pickVar(key, arr) {
 /* ---------- 视频池：六段先整段下成 Blob 再本地播放，播放中零网络依赖 ---------- */
 const SEGFILES = {
   seg1: "seg1-mimi-hello.mp4", seg2: "seg2-peter-bag.mp4", seg3: "seg3-peter-age.mp4",
-  seg4: "seg4-peter-from.mp4", seg5: "seg5-peter-fromok.mp4", seg6: "seg6-lulu-class.mp4"
+  seg4: "seg4-peter-from.mp4", seg5: "seg5-peter-fromok.mp4", seg6: "seg6-lulu-class.mp4",
+  seg7: "seg7-smith-rollcall.mp4", seg8: "seg8-parrot-chaos.mp4", seg9: "seg9-peter-twin.mp4",
+  seg10: "seg10-lulu-band.mp4", seg11: "seg11-smith-stamp.mp4"
 };
 const vids = {};
 let activeVid = null;
@@ -564,7 +578,21 @@ const AUDIO_FILES = ["mimi-hello","mimi-name-ok","mimi-name-retry","mimi-name-re
  "mimi-seal-open","mimi-seal-star","mimi-seal-stay",
  "word-fullname","word-firstname","word-lastname","word-classmate","word-grade","word-country",
  "word-same","word-twin","word-band","word-guitar","word-tennis","word-hobby",
- "word-information","word-mistake","word-parrot","word-hotpot"];
+ "word-information","word-mistake","word-parrot","word-hotpot",
+ /* 第二幕配音（声线：Mimi=MAI_01 / Peter=MAI_03@106 / Lulu=marisol@107 / Mr Smith=MAI_02@95 本幕新定） */
+ "smith-morning","smith-call-peter","smith-call-lulu","smith-call-you","peter-here","lulu-here",
+ "model-here","lulu-here-ok","peter-here-ok","peter-here-rescue","lulu-here-rescue",
+ "mimi-here-retry","mimi-fullname-retry","mimi-thatme-retry","mimi-twin-retry",
+ "mimi-band-retry","mimi-guitar-retry","mimi-tennis-retry","mimi-hobby-retry",
+ "mimi-act2-intro","mimi-chaos","mimi-defend",
+ "mimi-fullname-ask","model-fullname","lulu-fullname-ok","peter-fullname-ok","peter-fullname-rescue","mimi-fullname-rescue",
+ "mimi-thatme-ask","model-thatme","peter-thatme-ok","lulu-thatme-ok","lulu-thatme-rescue","peter-thatme-rescue",
+ "peter-twin-intro","peter-twin-ask","model-twin","peter-twin-ok","lulu-twin-ok","peter-twin-rescue","lulu-twin-rescue",
+ "lulu-band-ask","model-band","lulu-band-ok","peter-band-ok","lulu-band-rescue","peter-band-rescue",
+ "lulu-guitar-ask","model-guitar","lulu-guitar-ok","peter-guitar-ok","lulu-guitar-rescue","peter-guitar-rescue",
+ "mimi-tennis-ask","model-tennis","peter-tennis-ok","lulu-tennis-ok","peter-tennis-rescue","lulu-tennis-rescue",
+ "mimi-hobby-ask","model-hobby","peter-hobby-ok","lulu-hobby-ok","peter-hobby-rescue","lulu-hobby-rescue",
+ "smith-stamp-line","mimi-act2-end"];
 const SFX_FILES = ["ding","pop","zipper","whistle","sparkle","squawk","fanfare"];
 const blobURLs = {}; // "audio/x" / "sfx/x" -> objectURL
 let assetsReady = false;
@@ -637,6 +665,9 @@ async function fetchAsBlobURL(url, onChunk) {
   throw lastErr;
 }
 const loadState = { bytes: 0, totalBytes: 0, filesDone: 0, filesTotal: 0 };
+/* 第二幕片段是否全部就位：就位才亮第二幕入口（片段缺失时入口自动隐藏，第一幕不受影响） */
+const segLoaded = {};
+let act2Ready = false;
 function renderLoadProgress() {
   let pct;
   if (loadState.totalBytes > 0) pct = Math.min(100, Math.round(loadState.bytes / loadState.totalBytes * 100));
@@ -667,7 +698,7 @@ async function loadAllAssets() {
       try {
         const u = await fetchAsBlobURL(j.url, got => { loadState.bytes += (got - counted); counted = got; renderLoadProgress(); });
         blobURLs[j.key] = u;
-        if (j.seg) vids[j.seg].src = u;
+        if (j.seg) { vids[j.seg].src = u; segLoaded[j.seg] = true; }
       } catch (e) {
         if (j.seg) vids[j.seg].src = j.url; /* 退回直连，至少能播 */
       }
@@ -683,6 +714,13 @@ async function loadAllAssets() {
   btn.disabled = false;
   btn.textContent = "开始上课";
   $("loadTxt").textContent = "装好啦，点「开始上课」！";
+  act2Ready = ["seg7", "seg8", "seg9", "seg10", "seg11"].every(k => segLoaded[k]);
+  window.__act2Ready = act2Ready;
+  if (act2Ready) {
+    $("act2Btn").classList.remove("hidden");
+    $("bookAct2Btn").classList.remove("hidden");
+    if (save.sticker1) $("act2DirectBtn").classList.remove("hidden");
+  }
 }
 /* 点按手势里把解码器逐个唤醒一次：消除真机上每句配音首次播放的启动延迟（嘴型系统性迟到的主因之一） */
 function primeMedia() {
@@ -696,7 +734,7 @@ function primeMedia() {
       else done();
     } catch (e) {}
   }
-  ["seg2", "seg3", "seg4", "seg5", "seg6"].forEach(k => {
+  ["seg2", "seg3", "seg4", "seg5", "seg6", "seg7", "seg8", "seg9", "seg10", "seg11"].forEach(k => {
     const v = vids[k];
     try {
       const p = v.play();
@@ -912,6 +950,191 @@ const TURNS = {
       if (t.includes("class") && (t.includes("grade") || /\b1\b/.test(t) || t.includes("one"))) return { ok: true, value: "Class 1, Grade 7" };
       return { ok: false };
     }
+  },
+  /* ---------- 第二幕回合：点名 / 名字保卫战（Peter、Lulu 当裁判） ---------- */
+  here: {
+    slot: "name", slotText: "I'm here!",
+    hint: "Mr Smith 点到你啦！大声答到：<b>I'm here!</b>",
+    frameHTML: "I'm <span class='blank'>＿＿</span>!",
+    exampleHTML: "I'm <span class='filled'>here</span>!",
+    firstWord: "I'm", model: "model-here",
+    chips: ["I'm", "here", "Peter", "banana"],
+    retryAudio: "mimi-here-retry", retryText: "Say it like this: I'm here! Now you — are you here?",
+    okCheers: [
+      { who: "Lulu", audio: "lulu-here-ok", text: "Referee Lulu says: GOAL! You are HERE!" },
+      { who: "Peter", audio: "peter-here-ok", text: "Referee Peter blows the whistle: present and correct!" }
+    ],
+    rescues: [
+      { who: "Peter", audio: "peter-here-rescue", text: "Peter jumps up: My friend is here! HERE! Mr Smith, my friend is here!" },
+      { who: "Lulu", audio: "lulu-here-rescue", text: "Lulu waves your card: Here! My friend is here, Mr Smith!" }
+    ],
+    funny: "whistle",
+    cheerSeg: ["seg7", 3.4, 6.2], rescueSeg: ["seg7", 3.4, 6.2],
+    check(t) {
+      if (t.includes("here") && (t.includes("i'm") || t.includes("i am") || t.includes("im") || t.trim() === "here")) return { ok: true, value: "I'm here!" };
+      return { ok: false };
+    }
+  },
+  fullname: {
+    slot: "age", slotText: "Wang Peter",
+    hint: "鹦鹉把 Peter 的名字喊成 Banana Peter 啦！他的姓是 <b>Wang</b>，说出他的<b>全名</b>，救回名字牌！",
+    frameHTML: "<span class='blank'>＿＿</span> Peter",
+    exampleHTML: "<span class='filled'>Wang</span> Peter",
+    firstWord: "Wang", model: "model-fullname",
+    chips: ["Wang", "Peter", "Banana", "Li"],
+    retryAudio: "mimi-fullname-retry", retryText: "Listen: Wang Peter! Wang is his family name. Say his full name!",
+    okCheers: [
+      { who: "Lulu", audio: "lulu-fullname-ok", text: "GOAL! Referee Lulu waves the green flag: Wang Peter is back!" },
+      { who: "Peter", audio: "peter-fullname-ok", text: "That's ME! Wang Peter! You saved my name!" }
+    ],
+    rescues: [
+      { who: "Peter", audio: "peter-fullname-rescue", text: "Peter shouts it himself: I am Wang Peter! WANG PETER! See? Like that!" },
+      { who: "Mimi", audio: "mimi-fullname-rescue", text: "Don't worry! Mimi writes it for you: Wang Peter. Safe and sound!" }
+    ],
+    funny: "whistle",
+    cheerSeg: ["seg8", 3.0, 6.0], rescueSeg: ["seg8", 3.0, 6.0],
+    check(t) {
+      if (t.includes("wang") && t.includes("peter")) return { ok: true, value: "Wang Peter" };
+      return { ok: false };
+    }
+  },
+  thatme: {
+    slot: "from", slotText: "That's me!",
+    hint: "鹦鹉说你的名字是 Pizza？！告诉 Mr Smith：<b>That's me!</b>",
+    frameHTML: "That's <span class='blank'>＿＿</span>!",
+    exampleHTML: "That's <span class='filled'>me</span>!",
+    firstWord: "That's", model: "model-thatme",
+    chips: ["That's", "me", "Pizza", "Peter"],
+    retryAudio: "mimi-thatme-retry", retryText: "Say it: That's me! That's YOU — not Pizza!",
+    okCheers: [
+      { who: "Peter", audio: "peter-thatme-ok", text: "Referee Peter: YES! That's my friend! Not Pizza!" },
+      { who: "Lulu", audio: "lulu-thatme-ok", text: "Lulu giggles: That's you! Pizza is a food, not a friend!" }
+    ],
+    rescues: [
+      { who: "Lulu", audio: "lulu-thatme-rescue", text: "Lulu holds your card high: Mr Smith! That's my friend! THAT'S my friend!" },
+      { who: "Peter", audio: "peter-thatme-rescue", text: "Peter points at you: That's my friend! Not Pizza — my FRIEND!" }
+    ],
+    funny: "whistle",
+    cheerSeg: ["seg8", 3.0, 6.0], rescueSeg: ["seg8", 3.0, 6.0],
+    check(t) {
+      if ((t.includes("that") && /\bme\b/.test(t)) || t.includes("that is me")) return { ok: true, value: "That's me!" };
+      return { ok: false };
+    }
+  },
+  twin: {
+    slot: "class", slotText: "twin", sealId: "twin",
+    hint: "两只一模一样的熊猫！Peter 的兄弟和他同年同月同日生，他是 Peter 的……？说出这个词，救下词卡！",
+    frameHTML: "He is Peter's <span class='blank'>＿＿＿＿</span>",
+    exampleHTML: "He is Peter's <span class='filled'>twin</span>",
+    firstWord: "twin", model: "model-twin",
+    chips: ["twin", "band", "tennis", "same"],
+    retryAudio: "mimi-twin-retry", retryText: "Two pandas, same face — they are twins! Say: twin!",
+    okCheers: [
+      { who: "Peter", audio: "peter-twin-ok", text: "YES! My TWIN brother! Two Peters — double fun!" },
+      { who: "Lulu", audio: "lulu-twin-ok", text: "Referee Lulu counts: one, two — TWINS! Goal!" }
+    ],
+    rescues: [
+      { who: "Peter", audio: "peter-twin-rescue", text: "The twins hug: We are twins! T-W-I-N, twins! Say it with us!" },
+      { who: "Lulu", audio: "lulu-twin-rescue", text: "Lulu runs in: They are TWINS! Same face, same birthday — twins!" }
+    ],
+    funny: "whistle",
+    cheerSeg: ["seg9", 0.3, 4.6], rescueSeg: ["seg9", 0.3, 4.6],
+    check(t) {
+      if (t.includes("twin")) return { ok: true, value: "twin" };
+      return { ok: false };
+    }
+  },
+  band: {
+    slot: "class", slotText: "band", sealId: "band",
+    hint: "Lulu 在学校的乐队里弹吉他！「乐队」这个词怎么说？说出它，词卡就安全了！",
+    frameHTML: "the school <span class='blank'>＿＿＿＿</span>",
+    exampleHTML: "the school <span class='filled'>band</span>",
+    firstWord: "band", model: "model-band",
+    chips: ["band", "guitar", "tennis", "hobby"],
+    retryAudio: "mimi-band-retry", retryText: "The school band! Music at school is a band. Your turn: band!",
+    okCheers: [
+      { who: "Lulu", audio: "lulu-band-ok", text: "YES! The school BAND! Music, music!" },
+      { who: "Peter", audio: "peter-band-ok", text: "Referee Peter dances: Band! Band! Best music in school!" }
+    ],
+    rescues: [
+      { who: "Lulu", audio: "lulu-band-rescue", text: "Lulu plays a big chord: This is my band! B, A, N, D. Band!" },
+      { who: "Peter", audio: "peter-band-rescue", text: "Peter claps: It's the school band! Band! Now you say it: band!" }
+    ],
+    funny: "whistle",
+    cheerSeg: ["seg10", 1.2, 5.0], rescueSeg: ["seg10", 1.2, 5.0],
+    check(t) {
+      if (t.includes("band")) return { ok: true, value: "band" };
+      return { ok: false };
+    }
+  },
+  guitar: {
+    slot: "class", slotText: "guitar", sealId: "guitar",
+    hint: "Lulu 手里弹的乐器是什么？说出它，救下这张词卡！",
+    frameHTML: "She plays the <span class='blank'>＿＿＿＿＿＿</span>",
+    exampleHTML: "She plays the <span class='filled'>guitar</span>",
+    firstWord: "guitar", model: "model-guitar",
+    chips: ["guitar", "band", "tennis", "parrot"],
+    retryAudio: "mimi-guitar-retry", retryText: "Look at her hands — it's a guitar! Say: guitar!",
+    okCheers: [
+      { who: "Lulu", audio: "lulu-guitar-ok", text: "My GUITAR! Strum strum! You got it!" },
+      { who: "Peter", audio: "peter-guitar-ok", text: "Referee Peter: Guitar! GOAL! What a star!" }
+    ],
+    rescues: [
+      { who: "Lulu", audio: "lulu-guitar-rescue", text: "Lulu holds it high: This is a GUITAR! Say it with me: guitar!" },
+      { who: "Peter", audio: "peter-guitar-rescue", text: "Peter mimes strumming: Guitar! Gui-tar! Like this!" }
+    ],
+    funny: "whistle",
+    cheerSeg: ["seg10", 1.2, 5.0], rescueSeg: ["seg10", 1.2, 5.0],
+    check(t) {
+      if (t.includes("guitar")) return { ok: true, value: "guitar" };
+      return { ok: false };
+    }
+  },
+  tennis: {
+    slot: "class", slotText: "tennis", sealId: "tennis",
+    hint: "Lulu 最喜欢的运动——她手里拿着球拍！是什么运动？说出它！",
+    frameHTML: "It's <span class='blank'>＿＿＿＿＿＿</span>",
+    exampleHTML: "It's <span class='filled'>tennis</span>",
+    firstWord: "tennis", model: "model-tennis",
+    chips: ["tennis", "guitar", "band", "hobby"],
+    retryAudio: "mimi-tennis-retry", retryText: "A racket and a ball. It's tennis! Say: tennis!",
+    okCheers: [
+      { who: "Peter", audio: "peter-tennis-ok", text: "Referee Peter: TENNIS! GOAL! You saved the card!" },
+      { who: "Lulu", audio: "lulu-tennis-ok", text: "That's my TENNIS! Thank you, name hero!" }
+    ],
+    rescues: [
+      { who: "Peter", audio: "peter-tennis-rescue", text: "Peter bounces a ball: It's tennis! TEN-NIS! This one!" },
+      { who: "Lulu", audio: "lulu-tennis-rescue", text: "Lulu swings her racket: Tennis! Now you: tennis!" }
+    ],
+    funny: "whistle",
+    cheerSeg: ["seg8", 3.0, 6.0], rescueSeg: ["seg8", 3.0, 6.0],
+    check(t) {
+      if (t.includes("tennis")) return { ok: true, value: "tennis" };
+      return { ok: false };
+    }
+  },
+  hobby: {
+    slot: "class", slotText: "hobby", sealId: "hobby",
+    hint: "最后一张卡！卡片问「你喜欢做什么」——那就是你的……？说出这个词！",
+    frameHTML: "my <span class='blank'>＿＿＿＿＿</span>",
+    exampleHTML: "my <span class='filled'>hobby</span>",
+    firstWord: "hobby", model: "model-hobby",
+    chips: ["hobby", "tennis", "mistake", "same"],
+    retryAudio: "mimi-hobby-retry", retryText: "What you like doing is your hobby! Say: hobby!",
+    okCheers: [
+      { who: "Peter", audio: "peter-hobby-ok", text: "Referee Peter: HOBBY! The last card is safe!" },
+      { who: "Lulu", audio: "lulu-hobby-ok", text: "HOBBY! You saved every card!" }
+    ],
+    rescues: [
+      { who: "Peter", audio: "peter-hobby-rescue", text: "Peter writes it big: HOBBY! What you like doing is your hobby!" },
+      { who: "Lulu", audio: "lulu-hobby-rescue", text: "Lulu points at the card: Hobby! Say: hobby!" }
+    ],
+    funny: "whistle",
+    cheerSeg: ["seg8", 3.0, 6.0], rescueSeg: ["seg8", 3.0, 6.0],
+    check(t) {
+      if (t.includes("hobby")) return { ok: true, value: "hobby" };
+      return { ok: false };
+    }
   }
 };
 function cap(s) { return s ? s.charAt(0).toUpperCase() + s.slice(1) : s; }
@@ -993,7 +1216,7 @@ async function judge(raw) {
     heardEl.textContent = "听到啦：" + (raw.length > 30 ? raw.slice(0, 30) + "…" : raw);
     heardEl.classList.add("got");
     if (cfg.slot === "name" && cfg.key === "name") state.name = r.value;
-    lightSlot(cfg.slot, cfg.key === "name2" ? state.name : r.value, false);
+    lightSlot(cfg.slot, cfg.key === "name2" ? state.name : (r.value || cfg.slotText || "✓"), false);
     const cb = cfg.onOk;
     const res = turnResolve;
     currentTurn = null; turnResolve = null;
@@ -1030,8 +1253,14 @@ async function judge(raw) {
       showCaption(rv.who, rv.text);
       await playAudio(rv.audio);
     }
+    /* 第二幕词卡回合：两次没说对，词进封印本（与第一幕同一本、同一 localStorage） */
+    if (cfg.sealId && WORDS.some(w => w.id === cfg.sealId)) {
+      const wasSealed = save.seal[cfg.sealId] && save.seal[cfg.sealId].sealed;
+      sealWord(cfg.sealId);
+      if (!wasSealed) pop("📕 这个词被收进封印本啦");
+    }
     const defaults = { name: state.name, name2: state.name, age: "12 岁", from: "China", class: "Class 1, Grade 7" };
-    lightSlot(cfg.slot, defaults[cfg.key], true);
+    lightSlot(cfg.slot, defaults[cfg.key] || cfg.slotText || "✓", true);
     if (cfg.onOk) cfg.onOk();
     res(true);
     return;
@@ -1456,7 +1685,9 @@ function renderBook() {
   let html = "";
   if (save.sticker1) html += "<div class='sticker got'><span class='st-emoji'>🏫</span><span class='st-name'>校门口纪念贴</span><span class='st-sub'>第 1 集 · 已到手</span></div>";
   else html += "<div class='sticker lock'><span class='st-emoji'>🏫</span><span class='st-name'>校门口纪念贴</span><span class='st-sub'>通关第一幕解锁</span></div>";
-  for (let i = 0; i < 5; i++) html += "<div class='sticker lock'><span class='st-emoji'>🔒</span><span class='st-name'>???</span><span class='st-sub'>下一集…</span></div>";
+  if (save.sticker2) html += "<div class='sticker got'><span class='st-emoji'>🛡️</span><span class='st-name'>名字保卫者贴</span><span class='st-sub'>第 2 集 · 已到手</span></div>";
+  else html += "<div class='sticker lock'><span class='st-emoji'>🛡️</span><span class='st-name'>名字保卫者贴</span><span class='st-sub'>通关第二幕解锁</span></div>";
+  for (let i = 0; i < 4; i++) html += "<div class='sticker lock'><span class='st-emoji'>🔒</span><span class='st-name'>???</span><span class='st-sub'>下一集…</span></div>";
   sg.innerHTML = html;
   $("sealGrid").innerHTML = WORDS.map(w => {
     const s = save.seal[w.id];
@@ -1476,6 +1707,18 @@ async function awardSticker() {
   $("award").classList.remove("hidden");
   await sleep(2800);
   $("award").classList.add("hidden");
+}
+async function awardSticker2() {
+  if (save.sticker2) return;
+  save.sticker2 = true; persist(); renderBook();
+  $("awardBadge").textContent = "🛡️";
+  $("awardName").textContent = "名字保卫者贴 · 第 2 集";
+  playSfx("fanfare"); confetti(36);
+  $("award").classList.remove("hidden");
+  await sleep(2800);
+  $("award").classList.add("hidden");
+  $("awardBadge").textContent = "🏫";
+  $("awardName").textContent = "校门口纪念贴 · 第 1 集";
 }
 
 /* ---------- 主流程：第一幕（双分支汇合） ---------- */
@@ -1577,6 +1820,105 @@ $("gameReplayBtn").onclick = async () => {
   $("endVeil").classList.add("hidden");
   await runGame();
   $("endVeil").classList.remove("hidden");
+};
+
+/* ---------- 第二幕：名字保卫战（教室 · Mr Smith 点名 → 鹦鹉大闹 → 裁判判罚） ---------- */
+const ACT1_TTL = "开学第一天 · 第 1 集 <small>七上 Unit 1《You and Me》第一幕</small>";
+const ACT1_SLOTS = { name: "NAME 名字", age: "AGE 年龄", from: "FROM 来自", class: "CLASS 班级" };
+function setSlots(labels, ttl) {
+  $("ttlMain").innerHTML = ttl;
+  for (const k in labels) {
+    const s = $("slot-" + k);
+    if (!s) continue;
+    s.classList.remove("on", "helped");
+    s.querySelector(".k").textContent = labels[k];
+    s.querySelector(".v").textContent = "?";
+  }
+}
+function enterAct2Chrome() {
+  setSlots({ name: "ROLL CALL 点名", age: "FULL NAME 全名", from: "THAT'S ME 是我", class: "WORD BATTLE 词卡战" },
+    "开学第一天 · 第 2 集 <small>七上 Unit 1《You and Me》第二幕 · 名字保卫战</small>");
+}
+function exitAct2Chrome() { setSlots(ACT1_SLOTS, ACT1_TTL); }
+async function playAct2() {
+  if (!act2Ready) return;
+  $("startVeil").classList.add("hidden");
+  $("endVeil").classList.add("hidden");
+  $("endVeil2").classList.add("hidden");
+  $("book").classList.add("hidden");
+  enterAct2Chrome();
+
+  /* 桥：Mimi 招呼进教室 */
+  await speakOver("seg1", "Mimi", "Quick! Into the classroom! Mr Smith is calling the roll!", "mimi-act2-intro", 0, 5.0);
+
+  /* 1 · Mr Smith 点名：Peter、Lulu 先答到，最后点到孩子 */
+  await playSegment("seg7", [
+    { who: "Mr Smith", text: "Good morning, class! I am Mr Smith. Let's see who is here today!", audio: "smith-morning", delay: 200 },
+    { who: "Mr Smith", text: "Peter?", audio: "smith-call-peter", delay: 350 },
+    { who: "Peter", text: "I'm here!", audio: "peter-here", delay: 150 },
+    { who: "Mr Smith", text: "Lulu?", audio: "smith-call-lulu", delay: 350 },
+    { who: "Lulu", text: "I'm here!", audio: "lulu-here", delay: 150 }
+  ]);
+  await speakOver("seg7", "Mr Smith", "And... our new friend? Are you here?", "smith-call-you", 3.4, 6.2);
+  await childTurn("here");
+
+  /* 2 · 鹦鹉大闹名字牌，名字保卫战开场（裁判：Peter + Lulu） */
+  playSfx("squawk");
+  await playSegment("seg8", [
+    { who: "Mimi", text: "Oh no! The parrot mixed up ALL the name cards! Mr Smith can't read them!", audio: "mimi-chaos", delay: 1400 }
+  ]);
+  await speakOver("seg8", "Mimi", "Name Battle! Peter and Lulu are the referees. Say the right names — save the cards!", "mimi-defend", 3.0, 6.0);
+
+  /* 3 · 保卫 Peter 的全名（Banana Peter 梗） */
+  await speakOver("seg8", "Mimi", "This card is Peter's! The parrot says his name is... Banana Peter?! NO! His family name is Wang. Say his FULL name!", "mimi-fullname-ask", 3.0, 6.0);
+  await childTurn("fullname");
+
+  /* 4 · 保卫孩子自己的名字（Pizza 梗） */
+  playSfx("squawk");
+  await speakOver("seg8", "Mimi", "Now the parrot has YOUR card! It says your name is... Pizza?! Is that you? Tell Mr Smith: That's me!", "mimi-thatme-ask", 3.0, 6.0);
+  await childTurn("thatme");
+
+  /* 5 · 双胞胎词卡（错词进封印本） */
+  await playSegment("seg9", [
+    { who: "Peter", text: "Look! This is my brother! Same birthday, same face!", audio: "peter-twin-intro", delay: 200 }
+  ]);
+  await speakOver("seg9", "Peter", "He is my...? What is the word? Help me!", "peter-twin-ask", 0.3, 4.6);
+  await childTurn("twin");
+
+  /* 6 · 乐队 + 吉他词卡 */
+  await playSegment("seg10", [
+    { who: "Lulu", text: "I play the guitar in the school...? What's the word?", audio: "lulu-band-ask", delay: 900 }
+  ]);
+  await childTurn("band");
+  await speakOver("seg10", "Lulu", "And what do I play? Look!", "lulu-guitar-ask", 1.2, 5.0);
+  await childTurn("guitar");
+
+  /* 7 · 最后两张词卡：网球 + 爱好 */
+  await speakOver("seg8", "Mimi", "One more card! Lulu's favourite sport — she is holding a racket! What is it?", "mimi-tennis-ask", 3.0, 6.0);
+  await childTurn("tennis");
+  await speakOver("seg8", "Mimi", "Last card! The card asks: What do you like doing? That is your...?", "mimi-hobby-ask", 3.0, 6.0);
+  await childTurn("hobby");
+
+  /* 8 · Mr Smith 盖章认证 + 第 2 枚贴纸 */
+  await playSegment("seg11", [
+    { who: "Mr Smith", text: "Wonderful! Every name is safe. You are a Name Hero!", audio: "smith-stamp-line", delay: 1600 }
+  ]);
+  await speakOver("seg11", "Mimi", "You did it! You saved ALL the names!", "mimi-act2-end", 2.5, 6.0);
+  await awardSticker2();
+  confetti();
+  pop("名字保卫战胜利 🛡️");
+  await sleep(1000);
+  $("endVeil2").classList.remove("hidden");
+}
+$("act2Btn").onclick = playAct2;
+$("act2DirectBtn").onclick = playAct2;
+$("bookAct2Btn").onclick = playAct2;
+$("act2AgainBtn").onclick = playAct2;
+$("backToAct1Btn").onclick = () => { exitAct2Chrome(); playAct1(); };
+$("act2GameBtn").onclick = async () => {
+  $("endVeil2").classList.add("hidden");
+  await runGame();
+  $("endVeil2").classList.remove("hidden");
 };
 renderBook();
 loadAllAssets();
