@@ -48,6 +48,7 @@
   .stage video {
     position:absolute; inset:0; width:100%; height:100%;
     object-fit:cover; opacity:0; transition:opacity .25s; z-index:1;
+    pointer-events:none;
   }
   .stage video.on { opacity:1; z-index:2; }
   /* 定格呼吸运镜：暂停帧极缓慢推近，定格看起来是活的 */
@@ -140,8 +141,10 @@
   }
   .mic:active { transform:translateY(2px); box-shadow:0 2px 0 #d18f12; }
   .mic.listening { background:#ff6b5e; animation:pulse 1s infinite; }
+  .mic.preparing { background:#ffe1a8; animation:none; transform:scale(.93); }
   @keyframes pulse { 0%{box-shadow:0 0 0 0 rgba(255,107,94,.5);} 100%{box-shadow:0 0 0 18px rgba(255,107,94,0);} }
   .micnote { font-size:12px; color:#7a6a45; line-height:1.5; }
+  .micdiag { font-size:10px; color:#b9c2c9; margin-top:5px; min-height:13px; letter-spacing:.2px; }
   .chips { margin-top:10px; display:none; }
   .chips.show { display:block; }
   .chips .lbl { font-size:12px; color:#7a6a45; margin-bottom:6px; }
@@ -335,6 +338,7 @@
         <button class="mic" id="micBtn" aria-label="开口说">🎤</button>
         <div class="micnote" id="micNote">说完停一下，<br>大家都在等你这一句。</div>
       </div>
+      <div class="micdiag" id="micDiag"></div>
       <div class="chips" id="chips">
         <div class="lbl">说不出来？点一点，把句子拼出来 👇</div>
         <div class="chiprow" id="chipRow"></div>
@@ -434,6 +438,15 @@ const frameTxt = $("frameTxt"), wordPop = $("wordPop"), hintNote = $("hintNote")
 const stageEl = $("stage");
 const A = f => "audio/" + f + ".mp3";
 const state = { name: "Leo", attempts: 0, built: [], recog: null, lastSentence: "", lastVoiceURL: null, lastModelAudio: null };
+/* iOS（含 iPad 桌面 UA、WKWebView）：本页开过 getUserMedia 录音会话后，系统语音
+   识别会拿到静音流（识别在跑却永远没声）。所以 iOS 上真声捕获整条禁用。 */
+const IS_IOS = (() => {
+  const ua = navigator.userAgent || "";
+  if (/iPhone|iPad|iPod/.test(ua)) return true;
+  if (/Macintosh/.test(ua) && (navigator.maxTouchPoints || 0) > 1) return true;
+  return false;
+})();
+window.__isIOS = IS_IOS;
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 /* ---------- 存档：贴纸 + 封印本（localStorage，刷新不丢） ---------- */
@@ -565,7 +578,9 @@ function playAudio(file) {
     const fin = () => { if (!done) { done = true; a.removeEventListener("ended", fin); resolve(); } };
     a.addEventListener("ended", fin);
     a.addEventListener("error", fin);
-    setTimeout(fin, 15000);
+    /* iOS 上 ended 偶尔不触发：按音频时长设兜底超时，绝不让剧情等死 */
+    const dur = isFinite(a.duration) && a.duration > 0 ? a.duration : 0;
+    setTimeout(fin, dur ? Math.min(15000, dur * 1000 + 3000) : 8000);
     try { a.currentTime = 0; } catch (e) {}
     a.play().catch(fin);
   });
@@ -724,6 +739,15 @@ function hideCaption() { caption.classList.remove("show"); }
 
 /* 全局补偿：真机音频输出有约 100ms 系统延迟，配音统一提前这个量，再叠加逐段偏移 */
 const LEAD_MS = 100;
+/* video.play() 的 Promise 在 iOS 上可能永不 settle（被打断时）：给它 1.2 秒兜底，
+   剧情状态机绝不许等死在某一次播放上 */
+function playVid(v) {
+  try {
+    const p = v.play();
+    if (p && p.then) return Promise.race([p.catch(() => {}), sleep(1200)]);
+  } catch (e) {}
+  return Promise.resolve();
+}
 function audioDurMs(f) {
   const a = AC[f];
   return (a && isFinite(a.duration) && a.duration > 0) ? a.duration * 1000 : 2500;
@@ -736,7 +760,7 @@ async function playSegment(segKey, lines) {
   setBreathe(v, false);
   try { v.currentTime = 0; } catch (e) {}
   armWatchdog(v);
-  try { await v.play(); } catch (e) {}
+  await playVid(v);
   let elapsed = 0; // 已调度的配音时间线（ms，不含 LEAD）
   for (const ln of lines) {
     let wait = 0;
@@ -763,7 +787,7 @@ async function speakOver(segKey, who, text, audio, fromT, loopToT) {
       if (v.currentTime >= loopToT || v.ended) { try { v.currentTime = fromT || 0; } catch (e) {} }
     }, 120);
   }
-  try { await v.play(); } catch (e) {}
+  await playVid(v);
   showCaption(who, text);
   await playAudio(audio);
   if (loopTimer) clearInterval(loopTimer);
@@ -891,6 +915,8 @@ function childTurn(key) {
   return new Promise(resolve => {
     currentTurn = TURNS[key];
     currentTurn.key = key;
+    teardownMic();              /* 进回合前先确保麦克风链路是干净状态 */
+    diagTurn(key);
     turnResolve = resolve;
     state.attempts = 0;
     state.built = [];
@@ -966,6 +992,7 @@ async function judge(raw) {
     const res = turnResolve;
     currentTurn = null; turnResolve = null;
     turnEl.classList.remove("show");
+    teardownMic();   /* 判定完成这一刻就收尾识别＋录音，下一题点麦克风时页面已是干净状态 */
     /* 角色真反应：音效+弹跳+小撒花，再随机抽一句本回合的庆祝台词（不连着重复） */
     playSfx("ding"); stageBounce(); confetti(14);
     if (cb) cb();
@@ -986,6 +1013,7 @@ async function judge(raw) {
     const res = turnResolve;
     currentTurn = null; turnResolve = null;
     turnEl.classList.remove("show");
+    teardownMic();   /* 同上：圆场判定完成即收尾麦克风链路 */
     if (cfg.funny) { playSfx(cfg.funny); stageWiggle(); }
     const rv = pickVar(cfg.key + "Rescue", cfg.rescues);
     if (cfg.rescueSeg && rv.audio.indexOf("mimi-") !== 0) {
@@ -1021,6 +1049,7 @@ function releaseCapture() {
   if (st) st.getTracks().forEach(tr => { try { tr.stop(); } catch (e) {} });
 }
 function startCapture() {
+  if (IS_IOS) return;   /* iOS（含 WKWebView）：本页开过录音会话后系统识别会拿到静音流——真声捕获整条禁用，鹦鹉改走示范句变调兜底（lastVoiceURL 保持空） */
   releaseCapture();                   /* 先把上一路收干净，再开新的一路 */
   if (!navigator.mediaDevices || !window.MediaRecorder) return;
   const gen = captureGen;
@@ -1046,12 +1075,52 @@ function startCapture() {
 }
 function stopCapture() { releaseCapture(); }
 
+/* ---------- 麦克风诊断角标：记录最近一次识别的事件链，华哥截图就能回报 ---------- */
+const micDiag = { turn: "-", events: [], watchdog: 0 };
+function renderDiag() {
+  const el = $("micDiag");
+  if (el) el.textContent = "🎤 " + micDiag.turn + (micDiag.events.length ? "：" + micDiag.events.join(" → ") : "");
+  window.__micDiag = micDiag;
+}
+function diagTurn(key) { micDiag.turn = key; micDiag.events = []; renderDiag(); }
+function diagEvent(txt) {
+  micDiag.events.push(txt);
+  if (micDiag.events.length > 3) micDiag.events.shift();
+  renderDiag();
+}
+
+/* 本题判定完成那一刻就把识别＋录音彻底收尾（不等下一题点击时才收）：
+   stop 实例、释放录音 tracks，onend 回来后 recogAlive 自动清零；判定到下一题之间
+   隔着反应动画与下一段剧情，音频会话有充分时间回落，下一题点击时页面已是干净状态。 */
+function teardownMic() {
+  stopCapture();
+  const rec = state.recog;
+  if (rec) { try { rec.stop(); } catch (e) {} }
+}
+/* 开识别前先静场：停掉一切还在响的声音输出（反应台词残留、示范音、音效），
+   别让播放通道占着音频会话。页面不用 WebAudio AudioContext（已核查），
+   声音输出只有这些 HTMLAudio 元素，逐个暂停即可。 */
+function silenceOutputs() {
+  for (const f in AC) { const a = AC[f]; try { if (!a.paused) a.pause(); } catch (e) {} }
+  for (const n in SFX) { const a = SFX[n]; try { if (!a.paused) a.pause(); } catch (e) {} }
+  if (typeof parrotAudio !== "undefined" && parrotAudio) { try { parrotAudio.pause(); } catch (e) {} }
+}
+/* 麦克风链路失败时的统一落点：可见提示＋展开拼句，绝不静默 */
+function micFailLoud(msg) {
+  micBtn.classList.remove("listening", "preparing");
+  heardEl.textContent = msg;
+  chipsEl.classList.add("show");
+}
+
 /* 语音识别
-   手机 Safari/WKWebView 的规矩：旧实例还没 onend 就 start 新实例，会静默失败或
-   拿不到声音。所以：每题新建实例；启动前先 stop 旧实例并等它 onend 收尾（带超时
-   兜底）；识别出最终结果立刻 stop 本实例，不留尾巴拖住下一题。出错自动重试一次，
-   再不行明确提示＋展开拼句兜底，绝不静默卡住。 */
-let recogAlive = false, recogStarting = false, recogSeq = 0, recogEndWaiters = [];
+   iOS 的两条实证教训：①本页开过 getUserMedia 录音会话后，系统识别会拿到静音流
+   （识别在跑、永远没声）——iOS 上真声捕获已整条禁用（见 startCapture）。
+   ②旧实例没 onend 就 start 新实例会静默失败。所以：每题新建实例；启动前先 stop
+   旧实例并等它 onend 收尾（带超时兜底）；判定完成那一刻就收尾（teardownMic）。
+   另外两只看门狗：onstart 2.5 秒没来＝启动被静默吞掉；启动后 4 秒零 interim
+   结果＝没收到音。两种情况都落到可见提示＋拼句兜底，绝不让孩子干瞪眼。
+   整条链路包在 try/catch 里：任何一步抛错都落到 micFailLoud，不许静默死。 */
+let recogAlive = false, recogStarting = false, recogStartStamp = 0, recogSeq = 0, recogEndWaiters = [];
 function recogEnded(seq) {
   if (seq === recogSeq) recogAlive = false;
   const ws = recogEndWaiters; recogEndWaiters = [];
@@ -1069,13 +1138,18 @@ function waitRecogEnded(ms) {
 async function startListening(isRetry) {
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!SR) {
-    micNote.innerHTML = "这台设备听不到声音，<br>用下面的拼句办法一样过关！";
-    chipsEl.classList.add("show");
+    diagEvent("无识别支持");
+    micFailLoud("这台设备听不到声音，用下面的拼句一样过关！");
     return;
   }
-  if (recogStarting) return;          /* 防连点叠开两路识别 */
-  recogStarting = true;
+  if (recogStarting) {
+    if (Date.now() - recogStartStamp < 3000) return;   /* 正在启动中，忽略连点 */
+    recogStarting = false;                              /* 锁超过 3 秒还没清＝上次启动卡死，强制解锁 */
+    diagEvent("锁超时解锁");
+  }
+  recogStarting = true; recogStartStamp = Date.now();
   try {
+    silenceOutputs();                                   /* 开识别前先静场 */
     if (state.recog) { try { state.recog.stop(); } catch (e) {} }
     await waitRecogEnded(900);        /* 等旧实例彻底结束再 start（手机端关键） */
     const rec = new SR();
@@ -1083,56 +1157,106 @@ async function startListening(isRetry) {
     const mySeq = ++recogSeq;
     rec.lang = "en-US";
     rec.interimResults = true;
-    let gotFinal = false;
+    let gotFinal = false, heardAny = false, started = false, wdTimer = null, startTimer = null;
+    const clearTimers = () => { if (wdTimer) clearTimeout(wdTimer); if (startTimer) clearTimeout(startTimer); wdTimer = startTimer = null; };
+    rec.onstart = () => {
+      started = true;
+      if (startTimer) { clearTimeout(startTimer); startTimer = null; }
+      diagEvent("启动");
+    };
     rec.onresult = e => {
+      if (!heardAny) {
+        heardAny = true;
+        if (wdTimer) { clearTimeout(wdTimer); wdTimer = null; }
+        diagEvent("听到✓");
+      }
       let txt = "";
       for (const res of e.results) txt += res[0].transcript;
       heardEl.textContent = "你说的是：" + txt;
       if (e.results[e.results.length - 1].isFinal) {
         gotFinal = true;
-        micBtn.classList.remove("listening");
+        clearTimers();
+        micBtn.classList.remove("listening", "preparing");
+        diagEvent("完成");
         try { rec.stop(); } catch (err) {}   /* 立刻收掉本实例，别拖住下一题 */
         stopCapture();
         judge(txt);
       }
     };
     rec.onerror = e => {
-      micBtn.classList.remove("listening");
+      clearTimers();
+      micBtn.classList.remove("listening", "preparing");
       if (state.recog === rec) stopCapture();
       if (gotFinal) return;
       const err = (e && e.error) || "";
+      diagEvent("err:" + (err || "?"));
       if (!isRetry && err !== "not-allowed" && err !== "service-not-allowed") {
         heardEl.textContent = "麦克风刚才没接上，我帮你再试一次…";
         waitRecogEnded(900).then(() => startListening(true));
       } else {
-        heardEl.textContent = err === "not-allowed" ? "麦克风被关掉了，去浏览器设置里打开；也可以用下面的拼句过关！" : "还是没听清，用下面的拼句一样过关！";
-        chipsEl.classList.add("show");
+        micFailLoud(err === "not-allowed" ? "麦克风被关掉了，去浏览器设置里打开；也可以用下面的拼句过关！" : "还是没听清，用下面的拼句一样过关！");
       }
     };
     rec.onend = () => {
-      micBtn.classList.remove("listening");
+      clearTimers();
+      micBtn.classList.remove("listening", "preparing");
       if (state.recog === rec) stopCapture();
+      diagEvent("结束");
       recogEnded(mySeq);
     };
-    micBtn.classList.add("listening");
-    heardEl.textContent = "在听啦…开口说吧！";
-    startCapture();
+    startCapture();                     /* iOS 上为空操作（已禁用），桌面端才真录 */
     try { rec.start(); recogAlive = true; }
     catch (e) {
-      micBtn.classList.remove("listening");
+      clearTimers();
+      micBtn.classList.remove("listening", "preparing");
       stopCapture();
       recogEnded(mySeq);
+      diagEvent("start抛错");
       if (!isRetry) {
         heardEl.textContent = "麦克风刚才没接上，我帮你再试一次…";
         setTimeout(() => startListening(true), 250);
       } else {
-        heardEl.textContent = "麦克风启动失败，用下面的拼句一样过关！";
-        chipsEl.classList.add("show");
+        micFailLoud("麦克风启动失败，用下面的拼句一样过关！");
       }
+      return;
     }
+    micBtn.classList.remove("preparing");
+    micBtn.classList.add("listening");
+    heardEl.textContent = "在听啦…开口说吧！";
+    /* 启动确认看门狗：2.5 秒内 onstart 没来＝这次启动被静默吞了 */
+    startTimer = setTimeout(() => {
+      if (!started && !gotFinal && state.recog === rec) {
+        diagEvent("启动无确认");
+        try { rec.stop(); } catch (e) {}
+        if (!isRetry) {
+          heardEl.textContent = "麦克风刚才没醒过来，我帮你再试一次…";
+          waitRecogEnded(900).then(() => startListening(true));
+        } else {
+          micFailLoud("麦克风没醒过来，用下面的拼句一样过关！");
+        }
+      }
+    }, 2500);
+    /* 收音看门狗：启动后 4 秒连一个 interim 结果都没有＝没收到音 */
+    wdTimer = setTimeout(() => {
+      if (!heardAny && !gotFinal && state.recog === rec && currentTurn) {
+        micDiag.watchdog++;
+        diagEvent("4秒没听到");
+        try { rec.stop(); } catch (e) {}
+        micFailLoud("好像没听到你的声音哦——再点一次麦克风试试，或者用下面的拼句过关！");
+      }
+    }, 4000);
+  } catch (e) {
+    diagEvent("异常:" + ((e && e.name) || "err"));
+    micFailLoud("麦克风出了点小问题，用下面的拼句一样过关！");
   } finally { recogStarting = false; }
 }
-micBtn.onclick = () => { startListening(false); };
+micBtn.onclick = () => {
+  /* 点击必须立刻有可见反馈，不等异步链路 */
+  micBtn.classList.add("preparing");
+  heardEl.textContent = "麦克风准备中…";
+  diagEvent("点击");
+  startListening(false);
+};
 /* 点一下回合说明也能展开拼句兜底 */
 $("turnHint").onclick = () => chipsEl.classList.toggle("show");
 /* ---------- 分支：先帮谁，孩子说了算 ---------- */
