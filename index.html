@@ -1674,8 +1674,17 @@ async function uploadAndJudge(blob) {
   } catch (e) {
     clearTimeout(to);
     micBtn.classList.remove("preparing");
-    diagEvent(e && e.name === "AbortError" ? "上传超时" : "上传失败");
-    micFailLoud("📶 网络有点慢，刚才没听清——再点一次麦克风试试，或者用下面的拼句过关！");
+    /* 2026-11-25 实测：403 是服务器拒收口令，不是网络慢——文案必须分开说，别再误导 */
+    if (e && e.name === "AbortError") {
+      diagEvent("上传超时");
+      micFailLoud("📶 网络有点慢，刚才没听清——再点一次麦克风试试，或者用下面的拼句过关！");
+    } else if (e && /http 403/.test(e.message || "")) {
+      diagEvent("服务器拒收403");
+      micFailLoud("🔒 服务器那边没认出咱们的口令——西西正在修，先用下面的拼句过关！");
+    } else {
+      diagEvent("上传失败");
+      micFailLoud("📶 网络有点慢，刚才没听清——再点一次麦克风试试，或者用下面的拼句过关！");
+    }
   }
 }
 micBtn.onclick = () => {
