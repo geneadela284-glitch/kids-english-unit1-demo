@@ -1602,7 +1602,12 @@ function startAnswerRecording() {
     answerStream = stream;
     const chunks = [];
     let rec = null;
-    try { rec = new MediaRecorder(stream); } catch (e) { releaseAnswerStream(); recBusy = false; micFailLoud("🎤 录音没启动起来，用下面的拼句一样过关！"); return; }
+    try {
+      /* 2026-11-26：录音降比特率到 32kbps（6 秒约 24KB，弱网上传更快；32k AAC 英文口语
+         已用重编码样本走真实接口验过转写可懂）。不认此参数的浏览器回落默认构造。 */
+      try { rec = new MediaRecorder(stream, { audioBitsPerSecond: 32000 }); }
+      catch (e2) { rec = new MediaRecorder(stream); }
+    } catch (e) { releaseAnswerStream(); recBusy = false; micFailLoud("🎤 录音没启动起来，用下面的拼句一样过关！"); return; }
     answerRec = rec;
     rec.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
     rec.onstop = () => {
@@ -1613,10 +1618,11 @@ function startAnswerRecording() {
       if (gen !== recGen) { recBusy = false; return; }   /* 被 teardown 取消：不上传、不判定 */
       const blob = new Blob(chunks, { type: rec.mimeType || "audio/mp4" });
       if (!blob.size) { recBusy = false; micFailLoud("🔊 刚才没录到声音——再点一次麦克风试试，或者用下面的拼句过关！"); return; }
+      const recMs = Date.now() - recStartStamp;
       /* 判定录音同时存为鹦鹉真声素材（全平台统一） */
       if (state.lastVoiceURL) { try { URL.revokeObjectURL(state.lastVoiceURL); } catch (e) {} }
       state.lastVoiceURL = URL.createObjectURL(blob);
-      uploadAndJudge(blob).finally(() => { recBusy = false; });
+      uploadAndJudge(blob, recMs).finally(() => { recBusy = false; });
     };
     try { rec.start(); } catch (e) { releaseAnswerStream(); recBusy = false; micFailLoud("🎤 录音没启动起来，用下面的拼句一样过关！"); return; }
     recStartStamp = Date.now();
@@ -1643,48 +1649,75 @@ function stopAnswerRecording() {
   const rec = answerRec;
   if (rec && rec.state !== "inactive") { try { rec.stop(); } catch (e) {} }
 }
-/* 上传转写：成功把文字交给 judge；失败/超时/空转写一律落到可见提示＋拼句兜底 */
-async function uploadAndJudge(blob) {
+/* 上传转写：成功把文字交给 judge；失败/超时/空转写一律落到可见提示＋拼句兜底。
+   2026-11-26 改走 XHR：只有它能分段计时（upload.onload = 发完；onload = 转写回来了），
+   诊断角标才能写出「录音→上传→等转写」三段耗时；等转写超过 3/8 秒给孩子可见反馈，
+   不许干等、不许把失败伪装成网络慢；403 绝不重试（重试也还是拒收），网络错/超时只重试 1 次。 */
+async function uploadAndJudge(blob, recMs) {
   micBtn.classList.add("preparing");
   heardEl.textContent = "听听你说的对不对…";
   diagEvent("上传");
-  const ctrl = new AbortController();
-  const to = setTimeout(() => { try { ctrl.abort(); } catch (e) {} }, ASR_FETCH_TIMEOUT_MS);
-  try {
-    const resp = await fetch(ASR_URL, {
-      method: "POST",
-      headers: { "X-Kids-Token": ASR_TOKEN, "Content-Type": blob.type || "audio/mp4" },
-      body: blob, signal: ctrl.signal
+  let done = false, wait3 = null, wait8 = null;
+  const clearWaits = () => { if (wait3) clearTimeout(wait3); if (wait8) clearTimeout(wait8); wait3 = wait8 = null; };
+  wait3 = setTimeout(() => { if (!done) heardEl.textContent = "还在认真听…"; }, 3000);
+  wait8 = setTimeout(() => {
+    if (!done) { heardEl.textContent = "转写有点慢，再等一下下，或者点下面的拼句先过关！"; chipsEl.classList.add("show"); }
+  }, 8000);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const r = await new Promise(resolve => {
+      const xhr = new XMLHttpRequest();
+      const tSend = performance.now();
+      let upMs = null;
+      xhr.open("POST", ASR_URL, true);
+      xhr.setRequestHeader("X-Kids-Token", ASR_TOKEN);
+      xhr.setRequestHeader("Content-Type", blob.type || "audio/mp4");
+      xhr.timeout = ASR_FETCH_TIMEOUT_MS;
+      xhr.upload.onload = () => { upMs = performance.now() - tSend; };
+      xhr.onload = () => resolve({ ok: xhr.status >= 200 && xhr.status < 300, status: xhr.status, body: xhr.responseText, upMs, totalMs: performance.now() - tSend });
+      xhr.onerror = () => resolve({ ok: false, status: 0, body: "", upMs, totalMs: performance.now() - tSend, netErr: true });
+      xhr.ontimeout = () => resolve({ ok: false, status: 0, body: "", upMs, totalMs: performance.now() - tSend, timeout: true });
+      try { xhr.send(blob); } catch (e) { resolve({ ok: false, status: 0, body: "", upMs, totalMs: performance.now() - tSend, netErr: true }); }
     });
-    clearTimeout(to);
-    if (!resp.ok) throw new Error("http " + resp.status);
-    const data = await resp.json();
-    const text = ((data && data.text) || "").trim();
-    micBtn.classList.remove("preparing");
-    if (!text) {
-      diagEvent("转写空");
-      micFailLoud("🔊 好像没听到你说话哦——大声一点再试一次，或者用下面的拼句过关！");
+    if (r.ok) {
+      clearWaits(); done = true;
+      micBtn.classList.remove("preparing");
+      const recS = ((recMs || 0) / 1000).toFixed(1);
+      const upS = (r.upMs == null ? "?" : (r.upMs / 1000).toFixed(1));
+      const trS = ((r.totalMs - (r.upMs == null ? 0 : r.upMs)) / 1000).toFixed(1);
+      diagEvent("⏱录音" + recS + "s·上传" + upS + "s·转写" + trS + "s");
+      let text = "";
+      try { text = ((JSON.parse(r.body) || {}).text || "").trim(); } catch (e) { text = ""; }
+      if (!text) {
+        diagEvent("转写空");
+        micFailLoud("🔊 好像没听到你说话哦——大声一点再试一次，或者用下面的拼句过关！");
+        return;
+      }
+      diagEvent("转写✓");
+      heardEl.textContent = "你说的是：" + text;
+      turnVia = "voice";
+      pendingVoiceBlob = blob;   /* 先攥着，judge 答对了才存进家长报告 */
+      judge(text);
       return;
     }
-    diagEvent("转写✓");
-    heardEl.textContent = "你说的是：" + text;
-    turnVia = "voice";
-    pendingVoiceBlob = blob;   /* 先攥着，judge 答对了才存进家长报告 */
-    judge(text);
-  } catch (e) {
-    clearTimeout(to);
-    micBtn.classList.remove("preparing");
-    /* 2026-11-25 实测：403 是服务器拒收口令，不是网络慢——文案必须分开说，别再误导 */
-    if (e && e.name === "AbortError") {
-      diagEvent("上传超时");
-      micFailLoud("📶 网络有点慢，刚才没听清——再点一次麦克风试试，或者用下面的拼句过关！");
-    } else if (e && /http 403/.test(e.message || "")) {
+    if (r.status === 403) {
+      clearWaits(); done = true;
+      micBtn.classList.remove("preparing");
       diagEvent("服务器拒收403");
       micFailLoud("🔒 服务器那边没认出咱们的口令——西西正在修，先用下面的拼句过关！");
-    } else {
-      diagEvent("上传失败");
-      micFailLoud("📶 网络有点慢，刚才没听清——再点一次麦克风试试，或者用下面的拼句过关！");
+      return;
     }
+    /* 2026-11-26 探测：上游偶发 504（10 次里 1 次、9.7s 才回），属瞬时故障，值得重试 1 次；
+       403 是口令拒收，重试无用，上面已直接返回。 */
+    if (attempt === 0 && (r.netErr || r.timeout || r.status >= 500)) {
+      diagEvent("上传重试");
+      await new Promise(res => setTimeout(res, 500));
+      continue;
+    }
+    clearWaits(); done = true;
+    micBtn.classList.remove("preparing");
+    diagEvent(r.timeout ? "上传超时" : "上传失败");
+    micFailLoud("📶 网络有点慢，刚才没听清——再点一次麦克风试试，或者用下面的拼句过关！");
+    return;
   }
 }
 micBtn.onclick = () => {
