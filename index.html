@@ -802,6 +802,13 @@ function phaseRender(ph) {
     renderFailBox(ph, "act2Fail", "act2FailList");
   }
 }
+/* 第二幕后台下载的让路条件：有视频正在播、或正在录音/上传（recBusy 从点下麦克风
+   到上传结束都为真）。弱网下后台下载不抢播放与麦克风的带宽/CPU，空闲时再续装。 */
+function phase2ShouldPause() {
+  try { if (typeof recBusy !== "undefined" && recBusy) return true; } catch (e) {}
+  try { const v = (typeof activeVid !== "undefined") ? activeVid : null; if (v && !v.paused && !v.ended) return true; } catch (e) {}
+  return false;
+}
 async function runPhaseJobs(ph, concurrency) {
   /* 同一幕不许两轮下载并发（断网恢复的自动重试可能与原流程撞车）：后到者排队等前一轮收尾 */
   if (ph.running) { while (ph.running) await sleep(300); }
@@ -809,6 +816,7 @@ async function runPhaseJobs(ph, concurrency) {
   const queue = ph.jobs.filter(j => j.state !== "ok");
   async function worker() {
     while (queue.length) {
+      if (ph.name === "act2") { while (phase2ShouldPause()) { ph.pausedMs = (ph.pausedMs || 0) + 300; await sleep(300); } }
       const j = queue.shift();
       if (j.state === "ok") continue;
       j.state = "run";
@@ -846,8 +854,13 @@ function buildJobs(segs, audios, withSfx) {
 }
 const phase1 = makePhase("act1", buildJobs(ACT1_SEGS, ACT1_AUDIO, true));
 const phase2 = makePhase("act2", buildJobs(ACT2_SEGS, ACT2_AUDIO, false));
-function createPhaseAudios(files) {
-  files.forEach(f => { if (blobURLs["audio/" + f]) { try { getAudio(f).load(); } catch (e) {} } });
+/* 批量建音频元素：一次全 load 会在弱 CPU 上顶出长任务，6 个一批、批间歇 70ms */
+async function createPhaseAudios(files) {
+  const list = files.filter(f => blobURLs["audio/" + f]);
+  for (let i = 0; i < list.length; i += 6) {
+    list.slice(i, i + 6).forEach(f => { try { getAudio(f).load(); } catch (e) {} });
+    await sleep(70);
+  }
 }
 function markAct2Ready() {
   act2Ready = ACT2_SEGS.every(k => !!vids[k].src);
@@ -855,7 +868,7 @@ function markAct2Ready() {
 }
 async function startLoading() {
   await runPhaseJobs(phase1, 4);
-  createPhaseAudios(ACT1_AUDIO);
+  await createPhaseAudios(ACT1_AUDIO);
   ensureSfx();
   assetsReady = true;
   const btn = $("startBtn");
@@ -864,21 +877,22 @@ async function startLoading() {
   $("loadTxt").textContent = phase1.failed().length ? "大部分装好啦，可以先开始上课！" : "装好啦，点「开始上课」！";
   $("bookAct2Btn").classList.remove("hidden");
   if (save.sticker1) $("act2DirectBtn").classList.remove("hidden");
-  /* 第二幕在后台继续装——第一幕玩着的时候就装齐了，进第二幕不用再等 */
-  runPhaseJobs(phase2, 3).then(() => {
-    createPhaseAudios(ACT2_AUDIO);
+  /* 第二幕在后台继续装——第一幕玩着的时候就装齐了，进第二幕不用再等。
+     单并发＋让路节流（播视频/录音上传时暂停，空闲再续）：弱网下不抢带宽 */
+  runPhaseJobs(phase2, 1).then(async () => {
+    await createPhaseAudios(ACT2_AUDIO);
     markAct2Ready();
   });
 }
 $("loadRetryBtn").onclick = async () => {
   await runPhaseJobs(phase1, 4);
-  createPhaseAudios(ACT1_AUDIO);
+  await createPhaseAudios(ACT1_AUDIO);
   phaseRender(phase1);
   if (!phase1.failed().length) $("loadTxt").textContent = "装好啦，点「开始上课」！";
 };
 $("act2RetryBtn").onclick = async () => {
-  await runPhaseJobs(phase2, 3);
-  createPhaseAudios(ACT2_AUDIO);
+  await runPhaseJobs(phase2, 1);
+  await createPhaseAudios(ACT2_AUDIO);
   markAct2Ready();
   if (act2Ready && !$("act2LoadVeil").classList.contains("hidden")) {
     $("act2LoadVeil").classList.add("hidden");
@@ -895,15 +909,15 @@ async function healFailed() {
     if (phase1.failed().length) {
       phase1.jobs.forEach(j => { if (j.state === "fail") j.state = "wait"; });
       await runPhaseJobs(phase1, 4);
-      createPhaseAudios(ACT1_AUDIO);
+      await createPhaseAudios(ACT1_AUDIO);
       phaseRender(phase1);
       if (assetsReady && !phase1.failed().length && !$("startVeil").classList.contains("hidden"))
         $("loadTxt").textContent = "网络回来啦，装好啦，点「开始上课」！";
     }
     if (phase2.failed().length) {
       phase2.jobs.forEach(j => { if (j.state === "fail") j.state = "wait"; });
-      await runPhaseJobs(phase2, 3);
-      createPhaseAudios(ACT2_AUDIO);
+      await runPhaseJobs(phase2, 1);
+      await createPhaseAudios(ACT2_AUDIO);
       markAct2Ready();
       phaseRender(phase2);
       if (act2Ready && !$("act2LoadVeil").classList.contains("hidden")) {
