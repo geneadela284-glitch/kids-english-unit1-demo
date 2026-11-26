@@ -579,18 +579,53 @@ for (const k in SEGFILES) {
   $("pool").appendChild(v);
   vids[k] = v;
 }
-function showSeg(key) {
+/* 过渡保护窗（2026-11-27 第五轮）：切段淡变与看门狗硬恢复、后台下载在此窗内让路 */
+let transitionUntil = 0;
+function waitEvent(el, name, ms) {
+  return new Promise(res => {
+    let done = false;
+    const fin = v => { if (!done) { done = true; res(v); } };
+    el.addEventListener(name, () => fin(true), { once: true });
+    setTimeout(() => fin(false), ms);
+  });
+}
+/* 切段（2026-11-27 第五轮·根治）：旧版只加 .on 做 180ms 淡变，新视频 readyState
+   还是 0（刚挂回 src、刚 load）时淡变露出的就是黑底；iOS 上解码跟不上更明显。
+   现在切过去之前先等首帧：没数据先 load（有界 2000ms），再拨到目标点等 seeked
+   （有界 1200ms）；旧帧一直留在台上，直到新帧就绪才淡变——任何一次切段都不出黑帧；
+   超时也切，不死等剧情。t 为目标起始秒数（默认 0）。 */
+async function showSeg(key, t) {
   const v = vids[key];
-  if (activeVid === v) return v;
+  if (!v) return null;
+  const target = (t == null ? 0 : t);
+  if (activeVid === v) {
+    /* 已在台上：只把时间拨到目标点，等 seeked 再走，免得播到一半跳帧 */
+    try { if (Math.abs(v.currentTime - target) > 0.15) { v.currentTime = target; await waitEvent(v, "seeked", 1200); } } catch (e) {}
+    return v;
+  }
   const old = activeVid;
   /* 进第二幕时释放过的第一幕片段：源还在本地 Blob 里，用到时秒挂回来，不走网络 */
   if (!v.src) { const bu = blobURLs["clips/" + key]; if (bu) v.src = bu; }
-  if (v.readyState === 0 && v.src) { try { v.load(); } catch (e) {} }
+  if (v.src && v.readyState < 2) { try { v.load(); } catch (e) {} await waitEvent(v, "loadeddata", 2000); }
+  try { if (Math.abs(v.currentTime - target) > 0.15) { v.currentTime = target; await waitEvent(v, "seeked", 1200); } } catch (e) {}
+  transitionUntil = performance.now() + 700;
   v.classList.add("on");
   activeVid = v;
   /* 淡变 180ms 一到就停掉旧的一路并移出合成树：两路同时解码+合成的窗口压到最短 */
   if (old) setTimeout(() => { old.classList.remove("on"); old.pause(); old.classList.remove("breathe"); }, 190);
   return v;
+}
+/* 空闲预热：回合一开始就把答对/答错要重播的那段首帧解出来（不播出，只备好），
+   庆祝切段时不再现挂现解。只对不在台上的段预热；在台上的段不动，免得拨乱当前画面 */
+function warmSeg(key, t) {
+  try {
+    const v = vids[key];
+    if (!v || v === activeVid) return;
+    if (!v.src) { const bu = blobURLs["clips/" + key]; if (!bu) return; v.src = bu; }
+    if (v.readyState >= 2) { try { if (Math.abs(v.currentTime - (t || 0)) > 0.15) v.currentTime = (t || 0); } catch (e) {} return; }
+    v.addEventListener("loadeddata", () => { try { v.currentTime = (t || 0); v.pause(); } catch (e) {} }, { once: true });
+    try { v.load(); } catch (e) {}
+  } catch (e) {}
 }
 /* 首屏：第一段停在开头当活背景（带呼吸运镜，不是一张死图） */
 vids.seg1.classList.add("on"); activeVid = vids.seg1;
@@ -624,10 +659,15 @@ setInterval(() => {
     const t = w.lastTime;
     w.recoveries++;
     if (w.recoveries >= 3) {
-      /* 软恢复无效：从 Blob 重新装载这一段（本地数据，瞬间完成） */
+      if (performance.now() < transitionUntil) { w.lastAdvance = now; return; } /* 过渡窗内不卸 src 硬恢复，只等切段自己把帧带出来 */
+      /* 软恢复无效：从 Blob 重新装载这一段（本地数据，瞬间完成）；等首帧到了再拨时间开播，不先黑屏 */
       wdStats.hardReloads++;
       const src = v.src;
-      try { v.pause(); v.removeAttribute("src"); v.load(); v.src = src; v.load(); v.currentTime = t; v.play().catch(() => {}); } catch (e) {}
+      try {
+        v.pause(); v.removeAttribute("src"); v.load(); v.src = src; v.load();
+        v.addEventListener("loadeddata", () => { try { v.currentTime = t; v.play().catch(() => {}); } catch (e) {} }, { once: true });
+        setTimeout(() => { try { if (Math.abs(v.currentTime - t) > 0.3) { v.currentTime = t; v.play().catch(() => {}); } } catch (e) {} }, 1500);
+      } catch (e) {}
       w.recoveries = 0;
     } else {
       try { v.pause(); v.currentTime = t; v.play().catch(() => {}); } catch (e) {}
@@ -706,9 +746,12 @@ function audioLog(entry) {
   } catch (e) {}
 }
 function audioSrcKind(url) { return (url && url.indexOf("blob:") === 0) ? "blob" : "direct"; }
-function playAudio(file) {
+function playAudio(file, opts) {
   return new Promise(resolve => {
     ttStampNext(); /* 判定完成后首次起播：就是下一句的起点 */
+    /* strict（单词播出专用，2026-11-27 第五轮）：没响就是失败——stalled/play-hang/
+       watchdog 到点未播完一律按失败结算，不许以“放行”当成功；对话配音保持旧行为（剧情不等死）。 */
+    const strict = !!(opts && opts.strict);
     let a = getAudio(file);
     let done = false, started = false, playSettled = false, endedOk = false;
     let lastCt = 0, lastAdvance = 0, playAttemptAt = performance.now();
@@ -739,8 +782,8 @@ function playAudio(file) {
       if (done) return;
       const ct = a.currentTime || 0;
       if (ct > lastCt + 0.03) { lastCt = ct; lastAdvance = performance.now(); }
-      if (started && performance.now() - lastAdvance > 1000) { fin(true, "stalled"); return; }
-      if (!playSettled && performance.now() - playAttemptAt > 2000) { fin(true, "play-hang"); return; }
+      if (started && performance.now() - lastAdvance > 1000) { fin(!strict, "stalled"); return; }
+      if (!playSettled && performance.now() - playAttemptAt > 2000) { fin(!strict, "play-hang"); return; }
     }, 250);
     /* 兜底看门狗：时长已知时按 dur+3s（上限 12s）；时长未知（元数据未到）先等
        loadedmetadata（最多 2s），再按实际时长算；元数据一直不到则按 9s 兜底。
@@ -755,7 +798,7 @@ function playAudio(file) {
         if (done) return;
         const dd = isFinite(a.duration) && a.duration > 0 ? a.duration : 0;
         const finished = a.ended || (dd > 0 && (a.currentTime || 0) >= dd - 0.15);
-        fin(true, finished ? "ok" : "watchdog", finished ? "watchdog-late" : undefined);
+        fin(finished ? true : !strict, finished ? "ok" : "watchdog", finished ? "watchdog-late" : undefined);
       }, cap);
     };
     if (a.readyState >= 1) armWatchdog();
@@ -768,6 +811,9 @@ function playAudio(file) {
     const tryPlay = (isRetry, isFallback) => {
       if (done) return;
       playAttemptAt = performance.now();
+      /* 真声起播：强制取消静音＋作废待处理的 prime 归零定时器——
+         70ms 内 prime 的 pause() 绝不能掐掉刚起来的真声 */
+      try { a.muted = false; a.__primeGen = (a.__primeGen || 0) + 1; } catch (e) {}
       try { a.currentTime = 0; } catch (e) {}
       let p;
       try { p = a.play(); } catch (e) { onPlayFail(e, isRetry, isFallback); return; }
@@ -827,6 +873,7 @@ function playSfx(name) {
       audioLog({ file: "sfx/" + name, src: audioSrcKind(a.src), result: "no-ended", ended: false, ctMoved: (a.currentTime || 0) > 0.05, ms: Math.round(performance.now() - startedAt) });
     }, 3000);
     const tryPlay = (isRetry, isFallback) => {
+      try { a.muted = false; } catch (e) {} /* 真声起播不许还挂着 prime 的静音 */
       try { a.currentTime = 0; } catch (e) {}
       let p;
       try { p = a.play(); } catch (e) { onFail(e, isRetry, isFallback); return; }
@@ -971,6 +1018,7 @@ function phaseRender(ph) {
 /* 第二幕后台下载的让路条件：有视频正在播、或正在录音/上传（recBusy 从点下麦克风
    到上传结束都为真）。弱网下后台下载不抢播放与麦克风的带宽/CPU，空闲时再续装。 */
 function phase2ShouldPause() {
+  try { if (typeof transitionUntil !== "undefined" && performance.now() < transitionUntil) return true; } catch (e) {} /* 切段过渡窗内不启动新下载 */
   try { if (typeof recBusy !== "undefined" && recBusy) return true; } catch (e) {}
   try { const v = (typeof activeVid !== "undefined") ? activeVid : null; if (v && !v.paused && !v.ended) return true; } catch (e) {}
   return false;
@@ -1226,9 +1274,8 @@ function audioDurMs(f) {
 async function playSegment(segKey, lines) {
   hideCaption();
   turnEl.classList.remove("show");
-  const v = showSeg(segKey);
+  const v = await showSeg(segKey, 0);
   setBreathe(v, false);
-  try { v.currentTime = 0; } catch (e) {}
   armWatchdog(v);
   await playVid(v);
   let elapsed = 0; // 已调度的配音时间线（ms，不含 LEAD）
@@ -1247,9 +1294,8 @@ async function playSegment(segKey, lines) {
 }
 /* 反应台词专用：垫上说话角色本人的动画重播（可指定循环窗口），嘴动着说，不再对着静帧说话 */
 async function speakOver(segKey, who, text, audio, fromT, loopToT) {
-  const v = showSeg(segKey);
+  const v = await showSeg(segKey, fromT || 0);
   setBreathe(v, false);
-  try { v.currentTime = fromT || 0; } catch (e) {}
   armWatchdog(v);
   let loopTimer = null;
   if (loopToT != null) {
@@ -1591,6 +1637,10 @@ function childTurn(key) {
   return new Promise(resolve => {
     currentTurn = TURNS[key];
     currentTurn.key = key;
+    /* 2026-11-27 第五轮：回合一开始就预热本回合答对/答错要重播的片段首帧，
+       庆祝切段时不再现挂现解（seg2–seg6 在进第二幕后已被卸 src） */
+    if (currentTurn.cheerSeg) warmSeg(currentTurn.cheerSeg[0], currentTurn.cheerSeg[1]);
+    if (currentTurn.rescueSeg) warmSeg(currentTurn.rescueSeg[0], currentTurn.rescueSeg[1]);
     teardownMic();              /* 进回合前先确保麦克风链路是干净状态 */
     diagTurn(key);
     turnResolve = resolve;
@@ -2186,22 +2236,78 @@ function ensureWordReady(id) {
 async function playGameWord(id) {
   const g = gameState;
   if (!g || g.over || !g.target || g.target.id !== id) return false;
-  g.wordHeard = true; /* 本轮单词已开始播：300ms 后的自动播出不再重复起播（喇叭点的和自动播的是同一个词，别播两遍）；
-    同步就记，不等播完——否则喇叭点完 300ms 内自动播出又起播一次，同一个词会重头再响一遍 */
+  g.wordClaimed = true; /* 本轮已认领：300ms 自动播不再重复起播；失败时清掉，自动播/再点才能重试 */
   await ensureWordReady(id);
   if (!gameState || gameState.over || !gameState.target || gameState.target.id !== id) return false;
-  const ok = await playAudio("word-" + id);
-  return ok;
+  const ok = await playAudio("word-" + id, { strict: true });
+  if (ok) { g.wordHeard = true; return true; }
+  g.wordClaimed = false;
+  return false;
+}
+/* ---------- 听力游戏单词通道（2026-11-27 第五轮·根治） ----------
+   真机根因：word-* 元素只在开局 primeMedia 时点火过一次；进第二幕只重 prime
+   了 ACT2_AUDIO，word-* 没重 prime；其间每一轮录音都会打断 iOS 音频会话，
+   旧点火全部作废——最后一局抢答时单词元素是“冷”的，非手势自动播直接被拒；
+   点小喇叭那下又要先 await ensureWordReady，真正 play() 时已出在手势窗口之外，
+   一样被拒；重试与 blob→直连兜底也都在手势之外，全军覆没，游戏却照常走。
+   根治：单词播出走一条不依赖“上次点火还热着”的路——
+   (1) 每局开局＋每次点按手势里，同步把 16 个 word-* 元素静音点火一次
+       （静音播出手势豁免，随时能点火；游戏里没有录音再打断，一局内点火一直有效）；
+   (2) 喇叭点按时元素就绪就同步起播，不先 await；
+   (3) 单词播出用 strict 模式：没响就是失败，不许以“放行”当成功；
+   (4) 播失败时页面看得见（喇叭抖动＋文字提示），点得了（再点重播）。 */
+const WORD_FILES = WORDS.map(w => "word-" + w.id);
+function primeGameWords() {
+  for (const f of WORD_FILES) {
+    const a = getAudio(f);
+    if (!a) continue;
+    try {
+      /* 正在真播的元素别碰：静音点火会先把它静音、70ms 后暂停掐断——
+         快点按卡片时自动播出的单词正在响，续火不能掐它 */
+      if (!a.paused && !a.muted) continue;
+      const gen = (a.__primeGen = (a.__primeGen || 0) + 1);
+      a.muted = true;
+      const p = a.play();
+      if (p && p.catch) p.catch(() => {});
+      setTimeout(() => {
+        if (a.__primeGen !== gen) return; /* 其间已起播真声：别碰它 */
+        try { a.pause(); a.currentTime = 0; a.muted = false; } catch (e) {}
+      }, 70);
+    } catch (e) {}
+  }
+}
+function gameWordFailed(seq) {
+  const g = gameState;
+  if (!g || g.over || g.locked) return;
+  if (seq != null && g.roundSeq !== seq) return; /* 轮次已过：别把提示写到新一轮上 */
+  const b = $("gameListen");
+  if (b) b.classList.add("listen-pulse");
+  $("gameMsg").textContent = "没听到？点一下 🔊 再听一遍！";
+}
+async function playGameWordNow(id) {
+  const g = gameState;
+  if (!g || g.over || !g.target || g.target.id !== id) return false;
+  const a = getAudio("word-" + id);
+  if (a && a.readyState >= 2) {
+    /* 元素已就绪：同步起播——play() 就发生在手势处理函数里，iOS 拒不掉 */
+    g.wordClaimed = true;
+    const ok = await playAudio("word-" + id, { strict: true });
+    if (ok) { g.wordHeard = true; return true; }
+    g.wordClaimed = false;
+    return false;
+  }
+  return playGameWord(id);
 }
 function runGame() {
   return new Promise(resolve => {
-    gameState = { stars: 0, combo: 0, correct: 0, sealedNew: 0, unsealedNew: 0, target: null, wrongs: 0, locked: false, over: false, resolve: resolve, timer: null, deadline: 0, roundSeq: 0, wordHeard: false };
+    gameState = { stars: 0, combo: 0, correct: 0, sealedNew: 0, unsealedNew: 0, target: null, wrongs: 0, locked: false, over: false, resolve: resolve, timer: null, deadline: 0, roundSeq: 0, wordHeard: false, wordClaimed: false };
     $("game").classList.remove("hidden");
     startGameRound0();
   });
 }
 function startGameRound0() {
   const g = gameState;
+  primeGameWords(); /* 开局就把 16 个单词音重新点火：上一幕的录音/视频打断后旧点火已作废 */
   g.stars = 0; g.combo = 0; g.correct = 0; g.sealedNew = 0; g.unsealedNew = 0; g.over = false;
   g.firstRound = true; /* 2026-11-26 第二轮：每局首轮单词不自动播，等孩子点小喇叭的手势触发——
     300ms 后自动播不在手势里，iOS 上会被拒；后续轮次自动播保留（带补播＋抖喇叭兜底） */
@@ -2228,7 +2334,7 @@ function nextRound() {
   const g = gameState;
   if (!g || g.over) return;
   g.locked = false; g.wrongs = 0;
-  g.roundSeq++; g.wordHeard = false; /* 新一轮：旧一轮挂起的自动播出全部作废 */
+  g.roundSeq++; g.wordHeard = false; g.wordClaimed = false; /* 新一轮：旧一轮挂起的自动播出全部作废 */
   const seq = g.roundSeq;
   const t = pickTarget();
   g.target = t;
@@ -2260,22 +2366,24 @@ function nextRound() {
     if (!gameState || gameState.over || gameState.roundSeq !== seq) return;
     const lb = $("gameListen");
     if (lb) lb.classList.remove("listen-pulse");
-    if (gameState.wordHeard) return;
+    if (gameState.wordHeard || gameState.wordClaimed) return;
     playGameWord(t.id).then(ok => {
-      if (!ok && gameState && !gameState.over && gameState.roundSeq === seq) { const b = $("gameListen"); if (b) b.classList.add("listen-pulse"); }
+      if (!ok && gameState && !gameState.over && gameState.roundSeq === seq) gameWordFailed(seq);
     });
   }, 300);
 }
 $("gameListen").onclick = () => {
   unlockAudio();
+  primeGameWords(); /* 手势里同步续火：单词元素重新在手势里播过 */
   const b = $("gameListen");
   if (b) b.classList.remove("listen-pulse");
   const g = gameState;
   /* 只播当轮目标词：轮次切换间隙（locked）不播旧词，新一轮 300ms 后自动播；
-     当轮词没就绪时 playGameWord 会先等它加载好，不拿旧音频顶上 */
+     元素就绪时同步起播（不等 await），iOS 手势窗口内一定能响；失败时喇叭抖动＋文字提示 */
   if (!g || g.over || g.locked || !g.target) return;
   g.firstRound = false;
-  playGameWord(g.target.id);
+  const seq = g.roundSeq;
+  playGameWordNow(g.target.id).then(ok => { if (!ok) gameWordFailed(seq); });
 };
 function gameTap(id, el) {
   unlockAudio();
@@ -2307,6 +2415,7 @@ function gameTap(id, el) {
       $("gameMsg").textContent = "⭐ 答对啦！就是 “" + t.en + "”！";
     }
     g.roundSeq++; /* 本轮已答完：挂起的自动播出作废，不许旧词漏进下一轮 */
+    primeGameWords(); /* 下一轮 300ms 自动播靠这次点火：手势里同步把单词元素续热 */
     setTimeout(nextRound, 1000);
     return;
   }
@@ -2323,6 +2432,7 @@ function gameTap(id, el) {
     const right = $("gameCards").querySelector("[data-id='" + t.id + "']");
     if (right) right.classList.add("answer");
     g.roundSeq++; /* 本轮已结束：挂起的自动播出作废 */
+    primeGameWords(); /* 下一轮 300ms 自动播靠这次点火：手势里同步把单词元素续热 */
     setTimeout(nextRound, 1500);
   } else {
     $("gameMsg").textContent = "不是这个哦，再听一遍，救出 “" + t.en + "” 之前先认对它！";
@@ -2656,6 +2766,7 @@ async function playAct2() {
     }
     await primeAudios(ACT2_AUDIO);
     primeSfx(); /* 第二幕入口重 prime 音效：第一幕录了多轮音后，会话可能已被打断过 */
+    primeGameWords(); /* 单词音也重 prime：不然最后一局抢答时它们还是开局那次冷点火 */
     await primeVids(ACT2_SEGS);
     $("act2LoadVeil").classList.add("hidden");
     if (myToken !== act2WaitToken) return;
