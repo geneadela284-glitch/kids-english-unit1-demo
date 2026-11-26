@@ -673,40 +673,98 @@ function getAudio(f) {
   return AC[f];
 }
 
-/* 播放失败诊断环：iOS 真机上 play() 被拒是静默的（无声也无报错），记下来供
-   排查；最近 20 条挂在 window.__audioLog 上，不写进任何用户可见文案。 */
-function logAudioErr(file, err) {
+/* 全量音频审计（2026-11-26 第二轮）：每一次 playAudio/playSfx 调用记一行——
+   时间、文件名、源（blob/直连）、play 结果、currentTime 是否走动、ended 是否触发、
+   失败时走了哪级恢复。最近 40 条在 window.__audioLog；失败计数与最近失败原因
+   常驻诊断角标，真机截图就能定位。桌面模拟过不代表真机过，审计本身要先在
+   Playwright 里造一次拒绝、一次超时，验证它如实记录。 */
+window.__audioLog = window.__audioLog || [];
+window.__audioFailCount = 0;
+window.__audioLastFail = "";
+window.__wordOkCount = 0;   /* 听力游戏单词音播出计数（审计日志只留最近 40 条，计数不丢） */
+window.__wordFailCount = 0;
+function audioLog(entry) {
   try {
-    window.__audioLog = window.__audioLog || [];
-    window.__audioLog.push({ t: Date.now(), file, err: (err && err.name) || String(err) });
-    if (window.__audioLog.length > 20) window.__audioLog.shift();
+    window.__audioLog.push(Object.assign({ t: Date.now() }, entry));
+    if (window.__audioLog.length > 40) window.__audioLog.shift();
+    if (entry.result && entry.result !== "ok") {
+      window.__audioFailCount++;
+      window.__audioLastFail = entry.file + ":" + entry.result;
+      renderDiag();
+    }
   } catch (e) {}
 }
+function audioSrcKind(url) { return (url && url.indexOf("blob:") === 0) ? "blob" : "direct"; }
 function playAudio(file) {
   return new Promise(resolve => {
-    const a = getAudio(file);
-    let done = false;
-    const fin = ok => { if (!done) { done = true; a.removeEventListener("ended", finOk); a.removeEventListener("error", finBad); resolve(ok !== false); } };
-    const finOk = () => fin(true);
-    const finBad = () => fin(false);
+    ttStampNext(); /* 判定完成后首次起播：就是下一句的起点 */
+    let a = getAudio(file);
+    let done = false, started = false, playSettled = false, endedOk = false;
+    let lastCt = 0, lastAdvance = 0, playAttemptAt = performance.now();
+    const startedAt = performance.now();
+    const fin = (ok, result) => {
+      if (done) return; done = true;
+      clearInterval(wd);
+      try { a.removeEventListener("ended", finOk); a.removeEventListener("error", finBad); } catch (e) {}
+      const moved = (a.currentTime || 0) > 0.05;
+      const effResult = result || (ok ? "ok" : "fail");
+      audioLog({ file, src: audioSrcKind(a.src), result: effResult, ended: endedOk, ctMoved: moved, ms: Math.round(performance.now() - startedAt) });
+      if (file.indexOf("word-") === 0) {
+        if (effResult === "ok") window.__wordOkCount++;
+        else window.__wordFailCount++;
+      }
+      resolve(ok !== false);
+    };
+    const finOk = () => { endedOk = true; fin(true); };
+    const finBad = () => { tryFallback("element-error"); };
     a.addEventListener("ended", finOk);
     a.addEventListener("error", finBad);
-    /* iOS 上 ended 偶尔不触发：按音频时长设兜底超时，绝不让剧情等死 */
+    /* 进度看门狗：播起来后 currentTime 停滞 1 秒即放行（剧情不等死）；
+       play() 承诺 2 秒不 settle 也放行；已知时长兜底 dur+2s（上限 12s），
+       未知时长兜底 5s。上一版的 8 秒静等是回答后停顿的重点嫌疑之一。 */
+    const wd = setInterval(() => {
+      if (done) return;
+      const ct = a.currentTime || 0;
+      if (ct > lastCt + 0.03) { lastCt = ct; lastAdvance = performance.now(); }
+      if (started && performance.now() - lastAdvance > 1000) { fin(true, "stalled"); return; }
+      if (!playSettled && performance.now() - playAttemptAt > 2000) { fin(true, "play-hang"); return; }
+    }, 250);
     const dur = isFinite(a.duration) && a.duration > 0 ? a.duration : 0;
-    setTimeout(() => fin(true), dur ? Math.min(15000, dur * 1000 + 3000) : 8000);
-    try { a.currentTime = 0; } catch (e) {}
-    /* 2026-11-26：play() 被手势策略拒了就补一次（250ms 后，期间的手势可能
-       已续上窗口）；两次都拒才按失败收尾，调用方据此决定要不要提示孩子点喇叭 */
-    const tryPlay = isRetry => {
+    setTimeout(() => { if (!done) fin(true, "watchdog"); }, dur ? Math.min(12000, dur * 1000 + 2000) : 5000);
+    const tryPlay = (isRetry, isFallback) => {
+      if (done) return;
+      playAttemptAt = performance.now();
+      try { a.currentTime = 0; } catch (e) {}
       let p;
-      try { p = a.play(); } catch (e) { logAudioErr(file, e); if (!isRetry) setTimeout(() => { if (!done) tryPlay(true); }, 250); else fin(false); return; }
-      if (p && p.catch) p.catch(err => {
-        logAudioErr(file, err);
-        if (!isRetry) setTimeout(() => { if (!done) tryPlay(true); }, 250);
-        else fin(false);
-      });
+      try { p = a.play(); } catch (e) { onPlayFail(e, isRetry, isFallback); return; }
+      if (p && p.then) p.then(() => { playSettled = true; started = true; lastAdvance = performance.now(); }).catch(err => onPlayFail(err, isRetry, isFallback));
+      else { playSettled = true; started = true; lastAdvance = performance.now(); }
     };
-    tryPlay(false);
+    const onPlayFail = (err, isRetry, isFallback) => {
+      playSettled = true;
+      audioLog({ file, src: audioSrcKind(a.src), result: "rejected:" + ((err && err.name) || String(err)), ended: false, ctMoved: false, ms: Math.round(performance.now() - startedAt) });
+      if (!isRetry) { setTimeout(() => { if (!done) tryPlay(true, isFallback); }, 250); return; }
+      if (!isFallback) { tryFallback("play-rejected"); return; }
+      fin(false);
+    };
+    const tryFallback = why => {
+      /* blob 源失败 → 换直连 URL 重建元素再播一次；直连也失败才认失败 */
+      const direct = A(file);
+      if (a.src && a.src.indexOf("blob:") === 0 && direct) {
+        try {
+          a.pause(); a.removeAttribute("src"); a.load();
+          const b = new Audio(direct); b.preload = "auto";
+          AC[file] = b; a = b;
+          a.addEventListener("ended", finOk); a.addEventListener("error", () => fin(false, "fallback-error"));
+          audioLog({ file, src: "direct", result: "fallback:" + why, ended: false, ctMoved: false, ms: Math.round(performance.now() - startedAt) });
+          started = false; playSettled = false; lastCt = 0; lastAdvance = performance.now();
+          tryPlay(true, true);
+          return;
+        } catch (e) {}
+      }
+      fin(false);
+    };
+    tryPlay(false, false);
   });
 }
 
@@ -720,19 +778,59 @@ function ensureSfx() {
 function playSfx(name) {
   try {
     ensureSfx();
-    const a = SFX[name];
+    let a = SFX[name];
     if (!a) return;
-    try { a.currentTime = 0; } catch (e) {}
-    /* 2026-11-26：与 playAudio 同理，被拒补一次再放弃，拒绝原因进诊断环 */
-    const tryPlay = isRetry => {
-      let p;
-      try { p = a.play(); } catch (e) { logAudioErr("sfx/" + name, e); if (!isRetry) setTimeout(() => tryPlay(true), 250); return; }
-      if (p && p.catch) p.catch(err => {
-        logAudioErr("sfx/" + name, err);
-        if (!isRetry) setTimeout(() => tryPlay(true), 250);
-      });
+    const startedAt = performance.now();
+    let logged = false;
+    const logOk = () => {
+      if (logged) return; logged = true;
+      audioLog({ file: "sfx/" + name, src: audioSrcKind(a.src), result: "ok", ended: true, ctMoved: (a.currentTime || 0) > 0.05, ms: Math.round(performance.now() - startedAt) });
     };
-    tryPlay(false);
+    a.addEventListener("ended", logOk, { once: true });
+    /* 播起来 3 秒还没 ended（被静场暂停等）：也记一行，免得成功调用无记录 */
+    setTimeout(() => {
+      if (logged) return; logged = true;
+      audioLog({ file: "sfx/" + name, src: audioSrcKind(a.src), result: "no-ended", ended: false, ctMoved: (a.currentTime || 0) > 0.05, ms: Math.round(performance.now() - startedAt) });
+    }, 3000);
+    const tryPlay = (isRetry, isFallback) => {
+      try { a.currentTime = 0; } catch (e) {}
+      let p;
+      try { p = a.play(); } catch (e) { onFail(e, isRetry, isFallback); return; }
+      if (p && p.catch) p.catch(err => onFail(err, isRetry, isFallback));
+    };
+    const onFail = (err, isRetry, isFallback) => {
+      audioLog({ file: "sfx/" + name, src: audioSrcKind(a.src), result: "rejected:" + ((err && err.name) || String(err)), ended: false, ctMoved: false, ms: Math.round(performance.now() - startedAt) });
+      if (!isRetry) { setTimeout(() => tryPlay(true, isFallback), 250); return; }
+      if (!isFallback) {
+        /* blob 源失败 → 直连重建再播一次 */
+        const direct = "sfx/" + name + ".mp3";
+        if (a.src && a.src.indexOf("blob:") === 0) {
+          try {
+            a.pause(); a.removeAttribute("src"); a.load();
+            const b = new Audio(direct); b.preload = "auto"; SFX[name] = b; a = b;
+            a.addEventListener("ended", logOk, { once: true });
+            audioLog({ file: "sfx/" + name, src: "direct", result: "fallback:play-rejected", ended: false, ctMoved: false, ms: Math.round(performance.now() - startedAt) });
+            tryPlay(true, true);
+            return;
+          } catch (e) {}
+        }
+      }
+    };
+    tryPlay(false, false);
+  } catch (e) {}
+}
+/* 手势内解锁（2026-11-26 第二轮）：iOS 上 getUserMedia 录音会打断音频会话，
+   之后非手势播放可能再被拒。每个关键点击手势里同步做一次静音点火（70ms 内
+   暂停归零），把会话续上。必须在手势处理函数的同步段里调，异步里调无效。 */
+let __unlockEl = null;
+function unlockAudio() {
+  try {
+    if (!__unlockEl) { __unlockEl = new Audio(sfxURL("ding")); __unlockEl.preload = "auto"; }
+    const a = __unlockEl;
+    a.muted = true;
+    const p = a.play();
+    if (p && p.catch) p.catch(() => {});
+    setTimeout(() => { try { a.pause(); a.currentTime = 0; a.muted = false; } catch (e) {} }, 70);
   } catch (e) {}
 }
 
@@ -1486,6 +1584,7 @@ function childTurn(key) {
 }
 /* 分级提示棒：1 露首词 → 2 露完整句型 → 3 听示范读音（之后再点重听） */
 $("hintBtn").onclick = () => {
+  unlockAudio();
   if (!currentTurn) return;
   if (hintLevel < 3) hintLevel++;
   if (hintLevel === 1) {
@@ -1509,6 +1608,7 @@ function renderChips() {
     const b = document.createElement("button");
     b.className = "chip"; b.textContent = w;
     b.onclick = () => {
+      unlockAudio();
       state.built.push(w);
       b.classList.add("used");
       builtEl.textContent = state.built.join(" ");
@@ -1518,9 +1618,10 @@ function renderChips() {
   });
 }
 $("clearBuilt").onclick = () => {
+  unlockAudio();
   state.built = []; builtEl.textContent = ""; $("sayBuilt").disabled = true; renderChips();
 };
-$("sayBuilt").onclick = () => { turnVia = "chips"; judge(state.built.join(" ").toLowerCase()); };
+$("sayBuilt").onclick = () => { unlockAudio(); turnVia = "chips"; judge(state.built.join(" ").toLowerCase()); };
 
 async function judge(raw) {
   if (!currentTurn) return;
@@ -1544,6 +1645,7 @@ async function judge(raw) {
     turnEl.classList.remove("show");
     teardownMic();   /* 判定完成这一刻就收尾识别＋录音，下一题点麦克风时页面已是干净状态 */
     /* 角色真反应：音效+弹跳+小撒花，再随机抽一句本回合的庆祝台词（不连着重复） */
+    ttSound(); /* 首次出声：答对反馈从这里开始响 */
     playSfx("ding"); stageBounce(); confetti(14);
     if (cb) cb();
     if (cfg.okCheers) {
@@ -1553,6 +1655,7 @@ async function judge(raw) {
     } else {
       await sleep(500);
     }
+    ttArmNext(); /* 下一句第一次起播时打点，停顿计时到此为止 */
     res(true);
     return;
   }
@@ -1565,6 +1668,7 @@ async function judge(raw) {
     currentTurn = null; turnResolve = null;
     turnEl.classList.remove("show");
     teardownMic();   /* 同上：圆场判定完成即收尾麦克风链路 */
+    ttSound(); /* 首次出声：圆场反馈从这里开始响 */
     if (cfg.funny) { playSfx(cfg.funny); stageWiggle(); }
     const rv = pickVar(cfg.key + "Rescue", cfg.rescues);
     if (cfg.rescueSeg && rv.audio.indexOf("mimi-") !== 0) {
@@ -1585,11 +1689,13 @@ async function judge(raw) {
     lightSlot(cfg.slot, defaults[cfg.key] || cfg.slotText || "✓", true);
     if (cfg.onOk) cfg.onOk();
     recordTurn(cfg, true);   /* 家长报告落账：这一句是老师带着过的，标「还没练稳」 */
+    ttArmNext(); /* 下一句第一次起播时打点，停顿计时到此为止 */
     res(true);
     return;
   }
   heardEl.textContent = "再试一次，你可以的！";
   showCaption("Mimi", cfg.retryText);
+  ttSound(); /* 再试一次的示范音就是首次出声 */
   playAudio(cfg.retryAudio);
 }
 
@@ -1696,6 +1802,7 @@ function startAnswerRecording() {
       /* 判定录音同时存为鹦鹉真声素材（全平台统一） */
       if (state.lastVoiceURL) { try { URL.revokeObjectURL(state.lastVoiceURL); } catch (e) {} }
       state.lastVoiceURL = URL.createObjectURL(blob);
+      ttStart(); /* 停录这一刻起表：后面每段耗时都进诊断角标 */
       uploadAndJudge(blob, recMs).finally(() => { recBusy = false; });
     };
     try { rec.start(); } catch (e) { releaseAnswerStream(); recBusy = false; micFailLoud("🎤 录音没启动起来，用下面的拼句一样过关！"); return; }
@@ -1727,19 +1834,27 @@ function stopAnswerRecording() {
 /* 上传转写：成功把文字交给 judge；失败/超时/空转写一律落到可见提示＋拼句兜底。
    2026-11-26 改走 XHR：只有它能分段计时（upload.onload = 发完；onload = 转写回来了），
    诊断角标才能写出「录音→上传→等转写」三段耗时；等转写超过 3/8 秒给孩子可见反馈，
-   不许干等、不许把失败伪装成网络慢；403 绝不重试（重试也还是拒收），网络错/超时只重试 1 次。 */
-async function uploadAndJudge(blob, recMs) {
-  micBtn.classList.add("preparing");
-  heardEl.textContent = "听听你说的对不对…";
-  diagEvent("上传");
-  let done = false, wait3 = null, wait8 = null;
-  const clearWaits = () => { if (wait3) clearTimeout(wait3); if (wait8) clearTimeout(wait8); wait3 = wait8 = null; };
-  wait3 = setTimeout(() => { if (!done) heardEl.textContent = "还在认真听…"; }, 3000);
-  wait8 = setTimeout(() => {
-    if (!done) { heardEl.textContent = "转写有点慢，再等一下下，或者点下面的拼句先过关！"; chipsEl.classList.add("show"); }
-  }, 8000);
-  for (let attempt = 0; attempt < 2; attempt++) {
-    const r = await new Promise(resolve => {
+   不许干等、不许把失败伪装成网络慢；403 绝不重试（重试也还是拒收），网络错/超时只重试 1 次。
+   2026-11-26 第二轮：停录立刻给反馈（短音效＋“听到了”＋弹跳），别让孩子干等黑屏；
+   主请求 2 秒没回就并行发第二请求、先回先用（只多花免费额度，不加最坏耗时）。
+   2026-11-26 第二轮实测：转写 p50 1.7s、p90 5.9s，第二请求 4 秒才发基本追不上
+   慢请求（赢时也已 6 秒）；改 2 秒发——慢尾能压到约 4 秒，多花的只是免费额度。 */
+function postAsr(blob) {
+  return new Promise(resolve => {
+    let done = false, failed = 0, x2started = false, x2timer = null;
+    const xs = [];
+    const finish = r => {
+      if (done) return; done = true;
+      if (x2timer) clearTimeout(x2timer);
+      xs.forEach(x => { try { x.abort(); } catch (e) {} });
+      resolve(r);
+    };
+    const onFail = r => {
+      failed++;
+      if (failed >= 2) finish(r);
+      else if (!x2started) start2(); /* 第一路挂了不等 4 秒，立刻发第二路 */
+    };
+    const mk = () => {
       const xhr = new XMLHttpRequest();
       const tSend = performance.now();
       let upMs = null;
@@ -1748,11 +1863,32 @@ async function uploadAndJudge(blob, recMs) {
       xhr.setRequestHeader("Content-Type", blob.type || "audio/mp4");
       xhr.timeout = ASR_FETCH_TIMEOUT_MS;
       xhr.upload.onload = () => { upMs = performance.now() - tSend; };
-      xhr.onload = () => resolve({ ok: xhr.status >= 200 && xhr.status < 300, status: xhr.status, body: xhr.responseText, upMs, totalMs: performance.now() - tSend });
-      xhr.onerror = () => resolve({ ok: false, status: 0, body: "", upMs, totalMs: performance.now() - tSend, netErr: true });
-      xhr.ontimeout = () => resolve({ ok: false, status: 0, body: "", upMs, totalMs: performance.now() - tSend, timeout: true });
-      try { xhr.send(blob); } catch (e) { resolve({ ok: false, status: 0, body: "", upMs, totalMs: performance.now() - tSend, netErr: true }); }
-    });
+      const res = (ok, extra) => Object.assign({ ok, status: xhr.status, body: xhr.responseText, upMs, totalMs: performance.now() - tSend }, extra || {});
+      xhr.onload = () => { const r = res(xhr.status >= 200 && xhr.status < 300); if (r.ok) finish(r); else onFail(r); };
+      xhr.onerror = () => onFail(res(false, { netErr: true }));
+      xhr.ontimeout = () => onFail(res(false, { timeout: true }));
+      try { xhr.send(blob); } catch (e) { onFail(res(false, { netErr: true })); }
+      xs.push(xhr);
+      return xhr;
+    };
+    const start2 = () => { if (x2started || done) return; x2started = true; if (x2timer) clearTimeout(x2timer); mk(); };
+    mk();
+    x2timer = setTimeout(start2, 2000);
+  });
+}
+async function uploadAndJudge(blob, recMs) {
+  micBtn.classList.add("preparing");
+  heardEl.textContent = "听到了！正在想想你说的对不对…";
+  playSfx("pop"); stageBounce(); /* 停录即时反馈：先响一声、动一下，再等转写 */
+  diagEvent("上传");
+  let done = false, wait3 = null, wait8 = null;
+  const clearWaits = () => { if (wait3) clearTimeout(wait3); if (wait8) clearTimeout(wait8); wait3 = wait8 = null; };
+  wait3 = setTimeout(() => { if (!done) heardEl.textContent = "还在认真听…"; }, 3000);
+  wait8 = setTimeout(() => {
+    if (!done) { heardEl.textContent = "转写有点慢，再等一下下，或者点下面的拼句先过关！"; chipsEl.classList.add("show"); }
+  }, 8000);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const r = await postAsr(blob);
     if (r.ok) {
       clearWaits(); done = true;
       micBtn.classList.remove("preparing");
@@ -1760,10 +1896,12 @@ async function uploadAndJudge(blob, recMs) {
       const upS = (r.upMs == null ? "?" : (r.upMs / 1000).toFixed(1));
       const trS = ((r.totalMs - (r.upMs == null ? 0 : r.upMs)) / 1000).toFixed(1);
       diagEvent("⏱录音" + recS + "s·上传" + upS + "s·转写" + trS + "s");
+      ttUpload(r.upMs, r.totalMs);
       let text = "";
       try { text = ((JSON.parse(r.body) || {}).text || "").trim(); } catch (e) { text = ""; }
       if (!text) {
         diagEvent("转写空");
+        if (turnTT) turnTT.status = "empty";
         micFailLoud("🔊 好像没听到你说话哦——大声一点再试一次，或者用下面的拼句过关！");
         return;
       }
@@ -1778,6 +1916,7 @@ async function uploadAndJudge(blob, recMs) {
       clearWaits(); done = true;
       micBtn.classList.remove("preparing");
       diagEvent("服务器拒收403");
+      if (turnTT) turnTT.status = "403";
       micFailLoud("🔒 服务器那边没认出咱们的口令——西西正在修，先用下面的拼句过关！");
       return;
     }
@@ -1785,27 +1924,39 @@ async function uploadAndJudge(blob, recMs) {
        403 是口令拒收，重试无用，上面已直接返回。 */
     if (attempt === 0 && (r.netErr || r.timeout || r.status >= 500)) {
       diagEvent("上传重试");
+      if (turnTT) { turnTT.retry = true; turnTT.status = r.timeout ? "timeout" : ("http" + r.status); }
       await new Promise(res => setTimeout(res, 500));
       continue;
     }
     clearWaits(); done = true;
     micBtn.classList.remove("preparing");
     diagEvent(r.timeout ? "上传超时" : "上传失败");
+    if (turnTT) turnTT.status = r.timeout ? "timeout" : "netErr";
     micFailLoud("📶 网络有点慢，刚才没听清——再点一次麦克风试试，或者用下面的拼句过关！");
     return;
   }
 }
 micBtn.onclick = () => {
+  unlockAudio(); /* 手势内续音频会话：录音会打断会话，每次点麦克风先续上 */
   /* 正在录音 → 点按停录上传；空闲 → 开始录音。点击立刻有可见反馈 */
   if (answerRec && answerRec.state === "recording") { stopAnswerRecording(); return; }
   startAnswerRecording();
 };
 
 /* ---------- 麦克风诊断角标：记录最近一次识别的事件链，华哥截图就能回报 ---------- */
-const micDiag = { turn: "-", events: [], watchdog: 0 };
+const micDiag = { turn: "-", events: [], watchdog: 0, lastTurn: null };
 function renderDiag() {
   const el = $("micDiag");
-  if (el) el.textContent = "🎤 " + micDiag.turn + (micDiag.events.length ? "：" + micDiag.events.join(" → ") : "");
+  let txt = "🎤 " + micDiag.turn + (micDiag.events.length ? "：" + micDiag.events.join(" → ") : "");
+  if (window.__audioFailCount) txt += " | 🔊音频失败×" + window.__audioFailCount + "（最近：" + window.__audioLastFail + "）";
+  const lt = micDiag.lastTurn;
+  if (lt) {
+    const s = v => (v == null ? "?" : (v / 1000).toFixed(1) + "s");
+    txt += " | ⏱上轮停录→响声" + s(lt.stopToSound) + "→下句" + s(lt.stopToNext) +
+      "（上传" + s(lt.upload) + "/转写" + s(lt.transcribe) + "/判定" + s(lt.judge) + "）" +
+      (lt.retry ? "·重试" : "") + (lt.status && lt.status !== "ok" ? "·" + lt.status : "");
+  }
+  if (el) el.textContent = txt;
   window.__micDiag = micDiag;
 }
 function diagTurn(key) { micDiag.turn = key; micDiag.events = []; renderDiag(); }
@@ -1813,6 +1964,39 @@ function diagEvent(txt) {
   micDiag.events.push(txt);
   if (micDiag.events.length > 3) micDiag.events.shift();
   renderDiag();
+}
+
+/* 回答后全链路计时（2026-11-26 第二轮）：停录→上传完→转写回→首次出声→下一句起播，
+   每段毫秒数进诊断角标与 window.__turnTimings（最近 20 轮）；超时/重试/504 也记，
+   不要只记成功路径。tNext 由 playAudio 在判定完成后首次起播时打点。 */
+let turnTT = null;
+window.__turnTimings = window.__turnTimings || [];
+function ttStart() { turnTT = { tStop: performance.now(), upMs: null, trMs: null, tTrDone: 0, tSound: 0, tNext: 0, armed: false, retry: false, status: "ok", done: false }; }
+function ttUpload(upMs, totalMs) { if (turnTT) { turnTT.upMs = upMs; turnTT.trMs = totalMs - (upMs || 0); turnTT.tTrDone = performance.now(); } }
+function ttSound() { if (turnTT && !turnTT.tSound) turnTT.tSound = performance.now(); }
+function ttArmNext() { if (turnTT) turnTT.armed = true; }
+function ttStampNext() {
+  if (turnTT && turnTT.armed && !turnTT.tNext) {
+    turnTT.tNext = performance.now(); turnTT.armed = false;
+    if (!turnTT.done) {
+      turnTT.done = true;
+      const t = turnTT;
+      const rec = {
+        at: Date.now(),
+        stopToSound: t.tSound ? Math.round(t.tSound - t.tStop) : null,
+        stopToNext: Math.round(t.tNext - t.tStop),
+        upload: t.upMs == null ? null : Math.round(t.upMs),
+        transcribe: t.trMs == null ? null : Math.round(t.trMs),
+        judge: (t.tSound && t.tTrDone) ? Math.round(t.tSound - t.tTrDone) : null,
+        nextGap: t.tSound ? Math.round(t.tNext - t.tSound) : null,
+        retry: t.retry, status: t.status
+      };
+      window.__turnTimings.push(rec);
+      if (window.__turnTimings.length > 20) window.__turnTimings.shift();
+      micDiag.lastTurn = rec;
+      renderDiag();
+    }
+  }
 }
 
 /* 本题判定完成那一刻就把录音链路彻底收尾（不等下一题点击时才收）：
@@ -1855,8 +2039,8 @@ function childChoice() {
     $("choice").classList.remove("hidden");
   });
 }
-$("choicePeter").onclick = () => { playSfx("pop"); $("choice").classList.add("hidden"); if (choiceResolve) choiceResolve("peter"); };
-$("choiceLulu").onclick = () => { playSfx("pop"); $("choice").classList.add("hidden"); if (choiceResolve) choiceResolve("lulu"); };
+$("choicePeter").onclick = () => { unlockAudio(); playSfx("pop"); $("choice").classList.add("hidden"); if (choiceResolve) choiceResolve("peter"); };
+$("choiceLulu").onclick = () => { unlockAudio(); playSfx("pop"); $("choice").classList.add("hidden"); if (choiceResolve) choiceResolve("lulu"); };
 
 /* ---------- 随机小事件：鹦鹉学舌（每局约一半概率，触发点在回合之间） ---------- */
 let PARROT_CHANCE = 0.5;
@@ -1871,6 +2055,7 @@ async function maybeParrot(cp) {
 }
 let parrotAudio = null, parrotSkipped = false;
 $("parrotSkip").onclick = () => {
+  unlockAudio();
   parrotSkipped = true;
   if (parrotAudio) { try { parrotAudio.pause(); } catch (e) {} }
   $("parrot").classList.add("hidden");
@@ -1936,6 +2121,8 @@ function runGame() {
 function startGameRound0() {
   const g = gameState;
   g.stars = 0; g.combo = 0; g.correct = 0; g.sealedNew = 0; g.unsealedNew = 0; g.over = false;
+  g.firstRound = true; /* 2026-11-26 第二轮：每局首轮单词不自动播，等孩子点小喇叭的手势触发——
+    300ms 后自动播不在手势里，iOS 上会被拒；后续轮次自动播保留（带补播＋抖喇叭兜底） */
   $("gameEnd").classList.add("hidden");
   $("gamePlay").classList.remove("hidden");
   $("gameStars").textContent = "0";
@@ -1976,6 +2163,13 @@ function nextRound() {
   if (s && s.sealed) { tag.textContent = "📕 封印中的词！答对解封 +1 星（" + s.stars + "/3）"; tag.classList.add("show"); }
   else tag.classList.remove("show");
   $("gameMsg").textContent = "听一听，点出你听到的词！";
+  if (g.firstRound) {
+    /* 首轮：不自动播，等孩子点小喇叭（手势内播一定能响）；小喇叭抖起来提示 */
+    $("gameMsg").textContent = "点一下 🔊 听一听，先听一遍！";
+    const lb = $("gameListen");
+    if (lb) lb.classList.add("listen-pulse");
+    return;
+  }
   /* 单词自动播：若两次播放都被拒（iOS 手势窗口），把小喇叭按钮抖起来提示孩子点它重听 */
   setTimeout(() => {
     if (!gameState || gameState.over) return;
@@ -1987,11 +2181,14 @@ function nextRound() {
   }, 300);
 }
 $("gameListen").onclick = () => {
+  unlockAudio();
   const b = $("gameListen");
   if (b) b.classList.remove("listen-pulse");
+  if (gameState) gameState.firstRound = false;
   if (gameState && gameState.target && !gameState.over) playAudio("word-" + gameState.target.id);
 };
 function gameTap(id, el) {
+  unlockAudio();
   const g = gameState;
   if (!g || g.over || g.locked) return;
   const t = g.target;
@@ -2056,7 +2253,7 @@ function endGame() {
   playAudio(g.stars >= 8 ? "mimi-game-end-good" : "mimi-game-end-ok");
   $("gameEnd").classList.remove("hidden");
 }
-$("gameAgain").onclick = () => { if (gameState) startGameRound0(); };
+$("gameAgain").onclick = () => { unlockAudio(); if (gameState) startGameRound0(); };
 $("gameDone").onclick = () => {
   const g = gameState;
   $("game").classList.add("hidden");
@@ -2309,6 +2506,7 @@ async function playAct1() {
   $("endVeil").classList.remove("hidden");
 }
 $("startBtn").onclick = async () => {
+  unlockAudio();
   if (!assetsReady) return;
   const btn = $("startBtn");
   btn.disabled = true;
@@ -2346,6 +2544,7 @@ function exitAct2Chrome() { setSlots(ACT1_SLOTS, ACT1_TTL); }
 let act2WaitToken = 0;
 let act2Primed = false;
 async function playAct2() {
+  unlockAudio(); /* 同步段续音频会话：进第二幕的手势里先续上 */
   if (!act2Primed) {
     const myToken = ++act2WaitToken;
     if (!act2Ready) {
@@ -2362,6 +2561,7 @@ async function playAct2() {
       $("act2LoadVeil").classList.remove("hidden");
     }
     await primeAudios(ACT2_AUDIO);
+    primeSfx(); /* 第二幕入口重 prime 音效：第一幕录了多轮音后，会话可能已被打断过 */
     await primeVids(ACT2_SEGS);
     $("act2LoadVeil").classList.add("hidden");
     if (myToken !== act2WaitToken) return;
@@ -2444,6 +2644,7 @@ $("act2CancelBtn").onclick = () => { act2WaitToken++; $("act2LoadVeil").classLis
 $("act2AgainBtn").onclick = playAct2;
 $("backToAct1Btn").onclick = () => { exitAct2Chrome(); playAct1(); };
 $("act2GameBtn").onclick = async () => {
+  unlockAudio();
   $("endVeil2").classList.add("hidden");
   await runGame();
   $("endVeil2").classList.remove("hidden");
