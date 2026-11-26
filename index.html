@@ -88,11 +88,13 @@
     position:absolute; left:0; right:0; bottom:0; z-index:7;
     background:linear-gradient(transparent, rgba(253,248,236,.97) 22%);
     padding:30px 14px 12px; transform:translateY(110%); transition:transform .45s cubic-bezier(.2,.9,.25,1);
+    pointer-events:none; /* 2026-11-27 第四轮：面板未滑入时不可点——旧版滑出 450ms 里仍能点到上一回合的词块，
+      点进 built 的句子会被下一回合的 childTurn 清掉，「说好了！」就变灰点不了；滑入动画里点到的已是新词块，无妨 */
     /* 2026-11-26 第三轮：面板内容超出舞台时（矮视口/拼句展开），滚轮与触摸都能在面板内滚动，
        不再出现“滚轮滚不动、顶被裁掉”的死角；内容够短时外观不变 */
     max-height:100%; overflow-y:auto; overscroll-behavior:contain;
   }
-  .turn.show { transform:translateY(0); }
+  .turn.show { transform:translateY(0); pointer-events:auto; }
   .turn .badge {
     display:inline-block; background:#1e9e75; color:#fff; font-size:12px; font-weight:700;
     padding:3px 10px; border-radius:999px; margin-bottom:6px;
@@ -156,7 +158,7 @@
   @keyframes micRing { 0%{transform:scale(.96); opacity:.9;} 100%{transform:scale(1.3); opacity:0;} }
   .mic.preparing { background:#ffe1a8; animation:none; transform:scale(.93); }
   .micnote { font-size:12px; color:#7a6a45; line-height:1.5; }
-  .micdiag { font-size:10px; color:#b9c2c9; margin-top:5px; min-height:13px; letter-spacing:.2px; }
+  .micdiag { font-size:10px; color:#7a8890; margin-top:5px; min-height:13px; letter-spacing:.2px; } /* 2026-11-27 第四轮：旧色 #b9c2c9 在浅色面板上几乎看不见，Mac 复演在所有状态都没找到诊断区——加深到浅底深底都可读 */
   .volbar { height:14px; width:220px; max-width:82%; margin:8px auto 0; background:#e3e9e4; border:2px solid #bfe3d2; border-radius:99px; overflow:hidden; opacity:0; transition:opacity .2s; }
   /* 2026-11-26：录音时唯一的实时反馈就是这条音量条——iOS 上做不了实时字幕，所以加粗加宽，让孩子看得见自己在出声。 */
   .volbar.show { opacity:1; }
@@ -451,6 +453,7 @@
       <div class="rep-sub">第 1 集《开学第一天》· 七上 Unit 1 —— 孩子在每一幕里开口说的句子和单词，都记在这里；带 ▶ 的可以回放孩子最近一次答对时的原声。</div>
       <div class="rep-summary" id="repSummary"></div>
       <div id="reportBody"></div>
+      <div class="micdiag" id="reportDiag"></div>
       <p class="book-note">🔒 孩子的录音只存在这台设备上，不会上传到任何地方；换设备或清掉浏览器数据就找不回来了。</p>
     </div>
 
@@ -484,6 +487,7 @@
       <button class="big alt" id="againBtn">再演一遍第一幕</button>
       <button class="big alt" id="gameReplayBtn">🎮 再玩听音抢答</button>
       <p style="margin-top:14px;font-size:12px;color:#bdb493;">第二幕在教室里：Mr Smith 点名、鹦鹉大闹名字牌！</p>
+      <div class="micdiag" id="endDiag"></div>
     </div>
 
     <div class="veil hidden" id="endVeil2">
@@ -494,6 +498,7 @@
       <button class="big alt" id="backToAct1Btn">↩ 回第一幕</button>
       <button class="big alt" id="act2GameBtn">🎮 再玩听音抢答</button>
       <p style="margin-top:14px;font-size:12px;color:#bdb493;">下一集预告：把朋友介绍给 Mr Smith 老师（第三幕）</p>
+      <div class="micdiag" id="endDiag2"></div>
     </div>
 
     <div class="veil hidden" id="act2LoadVeil" style="z-index:30;">
@@ -1594,7 +1599,7 @@ function childTurn(key) {
     state.built = [];
     state.lastModelAudio = currentTurn.model;
     builtEl.textContent = "";
-    $("sayBuilt").disabled = true;
+    syncSayBuilt();
     heardEl.textContent = "点麦克风，开口说英语";
     heardEl.classList.remove("got", "loud");
     micNote.innerHTML = "点麦克风开始说，<br>说完会自动停，也可以点一下 🎤";
@@ -1610,6 +1615,9 @@ function childTurn(key) {
     chipsEl.classList.add("show"); /* 2026-11-26 第三轮：拼句区默认展开——首回合收起时孩子找不到拼句入口，
       点提示文字才能展开的隐藏机关已取消；麦克风仍是主入口，拼句是看得见的兜底 */
     hideCaption();
+    /* 2026-11-27 第四轮：回合切换立刻同步刷新——新词块与模板写进 DOM 后先强制一次同步布局，
+      再等 250ms 滑入；旧版不等布局就起滑入动画，合成层第一帧常是上一回合的光栅，真机上词块滞后一拍 */
+    void turnEl.offsetHeight;
     setTimeout(() => turnEl.classList.add("show"), 250);
   });
 }
@@ -1643,14 +1651,25 @@ function renderChips() {
       state.built.push(w);
       b.classList.add("used");
       builtEl.textContent = state.built.join(" ");
-      $("sayBuilt").disabled = false;
+      syncSayBuilt();
     };
     chipRow.appendChild(b);
   });
 }
+/* 2026-11-27 第四轮：「说好了！」的启用态只由拼好的句子决定，不由“刚才点过谁”决定——
+   旧版三处各写一次 disabled=true/false，回合切换时一次重置就能把它留在禁用态；
+   现在它是 built[] 的纯函数，拼好必可点、拼空必禁用 */
+function syncSayBuilt() { $("sayBuilt").disabled = state.built.length === 0; }
+/* 回合结束立刻清掉旧面板内容：词块、模板、已拼句子与按钮态一起清——
+   旧版只把面板滑下去（transform 110%），旧词块仍在 DOM 里，滑入动画第一帧常带着上一回合的光栅，
+   真机上要等/滚动才刷新出新词块；清掉后滑下去的是空面板，不可能再出现旧词块 */
+function clearTurnUI() {
+  chipRow.innerHTML = ""; frameTxt.innerHTML = ""; builtEl.textContent = "";
+  state.built = []; syncSayBuilt();
+}
 $("clearBuilt").onclick = () => {
   unlockAudio();
-  state.built = []; builtEl.textContent = ""; $("sayBuilt").disabled = true; renderChips();
+  state.built = []; builtEl.textContent = ""; syncSayBuilt(); renderChips();
 };
 $("sayBuilt").onclick = () => { unlockAudio(); turnVia = "chips"; judge(state.built.join(" ").toLowerCase()); };
 
@@ -1674,6 +1693,7 @@ async function judge(raw) {
     const res = turnResolve;
     currentTurn = null; turnResolve = null;
     turnEl.classList.remove("show");
+    clearTurnUI(); /* 回合结束即清旧词块/模板，滑下去的面板是空的，不留上一回合的光栅 */
     teardownMic();   /* 判定完成这一刻就收尾识别＋录音，下一题点麦克风时页面已是干净状态 */
     /* 角色真反应：音效+弹跳+小撒花，再随机抽一句本回合的庆祝台词（不连着重复） */
     ttSound(); /* 首次出声：答对反馈从这里开始响 */
@@ -1698,6 +1718,7 @@ async function judge(raw) {
     const res = turnResolve;
     currentTurn = null; turnResolve = null;
     turnEl.classList.remove("show");
+    clearTurnUI(); /* 圆场结束也一样清旧面板，不留上一回合的词块 */
     teardownMic();   /* 同上：圆场判定完成即收尾麦克风链路 */
     ttSound(); /* 首次出声：圆场反馈从这里开始响 */
     if (cfg.funny) { playSfx(cfg.funny); stageWiggle(); }
@@ -1991,6 +2012,9 @@ function renderDiag() {
   const gd = $("gameDiag");
   if (gd) gd.textContent = txt; /* 2026-11-26 第三轮：游戏进行时回合面板被游戏盖住，诊断行在游戏里也要看得见——
     之前“上轮耗时”只写在回合面板的角标里，游戏阶段全程看不到 */
+  /* 2026-11-27 第四轮：结算幕（endVeil/endVeil2）与家长报告页之前完全没有诊断行，
+    复验到那儿就核对不了音频失败数与耗时——三处与回合面板/游戏写同一份文本 */
+  ["endDiag", "endDiag2", "reportDiag"].forEach(id => { const d = $(id); if (d) d.textContent = txt; });
   window.__micDiag = micDiag;
 }
 function diagTurn(key) { micDiag.turn = key; micDiag.events = []; renderDiag(); }
