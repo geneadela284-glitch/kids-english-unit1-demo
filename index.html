@@ -88,6 +88,9 @@
     position:absolute; left:0; right:0; bottom:0; z-index:7;
     background:linear-gradient(transparent, rgba(253,248,236,.97) 22%);
     padding:30px 14px 12px; transform:translateY(110%); transition:transform .45s cubic-bezier(.2,.9,.25,1);
+    /* 2026-11-26 第三轮：面板内容超出舞台时（矮视口/拼句展开），滚轮与触摸都能在面板内滚动，
+       不再出现“滚轮滚不动、顶被裁掉”的死角；内容够短时外观不变 */
+    max-height:100%; overflow-y:auto; overscroll-behavior:contain;
   }
   .turn.show { transform:translateY(0); }
   .turn .badge {
@@ -125,7 +128,7 @@
   .hintbtn:active { transform:translateY(2px); box-shadow:0 1px 0 #4c2a9e; }
   .hintbtn .stars { display:block; font-size:11px; letter-spacing:2px; color:#ffd97a; }
   .hintnote { font-size:12px; color:#7a6a45; margin-bottom:5px; min-height:16px; }
-  .turn .hint { font-size:14px; color:#41584d; margin-bottom:4px; }
+  .turn .hint { font-size:14px; color:#41584d; margin-bottom:4px; cursor:pointer; } /* 点回合说明可收起/展开拼句，给它可点的样子 */
   .turn .hint b { color:#1e5c46; }
   .turn .heard { font-size:13px; color:#8a97a5; min-height:18px; margin-bottom:6px; }
   .turn .heard.got { color:#1e5c46; font-weight:700; }
@@ -183,6 +186,7 @@
     align-items:center; justify-content:flex-end; text-align:center;
     background:linear-gradient(transparent 40%, rgba(13,26,21,.88));
     color:#fff; padding:24px 20px 34px;
+    overflow-y:auto; overscroll-behavior:contain; /* 矮视口时开始/结束幕也能滚动 */
   }
   .veil h1 { font-size:24px; margin-bottom:6px; text-shadow:0 2px 8px rgba(0,0,0,.5); }
   .veil p { font-size:14px; color:#e8e2cd; line-height:1.6; margin-bottom:16px; }
@@ -247,6 +251,7 @@
   .game {
     position:absolute; inset:0; z-index:9; display:flex; flex-direction:column;
     background:linear-gradient(170deg,#fdf8ec,#ffefc4); padding:14px;
+    overflow-y:auto; overscroll-behavior:contain; /* 矮视口时游戏面板也能滚轮/触摸滚动 */
   }
   .game-top { display:flex; align-items:center; justify-content:space-between; gap:8px; }
   .game-title { font-size:16px; font-weight:900; color:#1e5c46; }
@@ -427,6 +432,7 @@
           <button class="btn ghost" id="gameDone">继续 ▶</button>
         </div>
       </div>
+      <div class="micdiag" id="gameDiag"></div>
     </div>
 
     <div class="book hidden" id="book">
@@ -702,13 +708,15 @@ function playAudio(file) {
     let done = false, started = false, playSettled = false, endedOk = false;
     let lastCt = 0, lastAdvance = 0, playAttemptAt = performance.now();
     const startedAt = performance.now();
-    const fin = (ok, result) => {
+    const fin = (ok, result, note) => {
       if (done) return; done = true;
       clearInterval(wd);
       try { a.removeEventListener("ended", finOk); a.removeEventListener("error", finBad); } catch (e) {}
       const moved = (a.currentTime || 0) > 0.05;
       const effResult = result || (ok ? "ok" : "fail");
-      audioLog({ file, src: audioSrcKind(a.src), result: effResult, ended: endedOk, ctMoved: moved, ms: Math.round(performance.now() - startedAt) });
+      const entry = { file, src: audioSrcKind(a.src), result: effResult, ended: endedOk, ctMoved: moved, ms: Math.round(performance.now() - startedAt) };
+      if (note) entry.note = note;
+      audioLog(entry);
       if (file.indexOf("word-") === 0) {
         if (effResult === "ok") window.__wordOkCount++;
         else window.__wordFailCount++;
@@ -729,8 +737,29 @@ function playAudio(file) {
       if (started && performance.now() - lastAdvance > 1000) { fin(true, "stalled"); return; }
       if (!playSettled && performance.now() - playAttemptAt > 2000) { fin(true, "play-hang"); return; }
     }, 250);
-    const dur = isFinite(a.duration) && a.duration > 0 ? a.duration : 0;
-    setTimeout(() => { if (!done) fin(true, "watchdog"); }, dur ? Math.min(12000, dur * 1000 + 2000) : 5000);
+    /* 兜底看门狗：时长已知时按 dur+3s（上限 12s）；时长未知（元数据未到）先等
+       loadedmetadata（最多 2s），再按实际时长算；元数据一直不到则按 9s 兜底。
+       2026-11-26 实测根因：mimi-game-end-ok 全长 5.112s，旧逻辑在元数据未到时只给
+       5s 平顶，ended 到时已超时 0.1s+，误记一次 watchdog 失败——其实播出来了。
+       看门狗到点时若音频其实已播完（ended 刚到或 currentTime 已到尾），不算失败。 */
+    const armWatchdog = () => {
+      if (done) return;
+      const d = isFinite(a.duration) && a.duration > 0 ? a.duration : 0;
+      const cap = d ? Math.min(12000, d * 1000 + 3000) : 9000;
+      setTimeout(() => {
+        if (done) return;
+        const dd = isFinite(a.duration) && a.duration > 0 ? a.duration : 0;
+        const finished = a.ended || (dd > 0 && (a.currentTime || 0) >= dd - 0.15);
+        fin(true, finished ? "ok" : "watchdog", finished ? "watchdog-late" : undefined);
+      }, cap);
+    };
+    if (a.readyState >= 1) armWatchdog();
+    else {
+      let armed = false;
+      const armOnce = () => { if (!armed) { armed = true; armWatchdog(); } };
+      a.addEventListener("loadedmetadata", armOnce, { once: true });
+      setTimeout(armOnce, 2000);
+    }
     const tryPlay = (isRetry, isFallback) => {
       if (done) return;
       playAttemptAt = performance.now();
@@ -1578,6 +1607,8 @@ function childTurn(key) {
     hintStars.textContent = "☆☆☆";
     hintNote.textContent = "卡住啦？点提示棒，一次帮一点 ⭐";
     renderChips();
+    chipsEl.classList.add("show"); /* 2026-11-26 第三轮：拼句区默认展开——首回合收起时孩子找不到拼句入口，
+      点提示文字才能展开的隐藏机关已取消；麦克风仍是主入口，拼句是看得见的兜底 */
     hideCaption();
     setTimeout(() => turnEl.classList.add("show"), 250);
   });
@@ -1957,6 +1988,9 @@ function renderDiag() {
       (lt.retry ? "·重试" : "") + (lt.status && lt.status !== "ok" ? "·" + lt.status : "");
   }
   if (el) el.textContent = txt;
+  const gd = $("gameDiag");
+  if (gd) gd.textContent = txt; /* 2026-11-26 第三轮：游戏进行时回合面板被游戏盖住，诊断行在游戏里也要看得见——
+    之前“上轮耗时”只写在回合面板的角标里，游戏阶段全程看不到 */
   window.__micDiag = micDiag;
 }
 function diagTurn(key) { micDiag.turn = key; micDiag.events = []; renderDiag(); }
@@ -2111,9 +2145,33 @@ function sealWord(id) {
   if (!s.sealed) { s.sealed = true; s.ever = true; s.stars = 0; persist(); updateSealBadge(); }
 }
 let gameState = null;
+/* 听力游戏单词播出（2026-11-26 第三轮）：只播当轮目标词。播之前先等音频元素就绪
+   （元数据/可播），没就绪不播旧音频顶上；播出后记 g.wordHeard，本轮不再自动重播。 */
+function ensureWordReady(id) {
+  return new Promise(resolve => {
+    const a = getAudio("word-" + id);
+    if (!a) return resolve(false);
+    if (a.readyState >= 2) return resolve(true);
+    let done = false;
+    const fin2 = v => { if (!done) { done = true; resolve(v); } };
+    a.addEventListener("canplay", () => fin2(true), { once: true });
+    a.addEventListener("error", () => fin2(false), { once: true });
+    setTimeout(() => fin2(a.readyState >= 2), 1500);
+  });
+}
+async function playGameWord(id) {
+  const g = gameState;
+  if (!g || g.over || !g.target || g.target.id !== id) return false;
+  g.wordHeard = true; /* 本轮单词已开始播：300ms 后的自动播出不再重复起播（喇叭点的和自动播的是同一个词，别播两遍）；
+    同步就记，不等播完——否则喇叭点完 300ms 内自动播出又起播一次，同一个词会重头再响一遍 */
+  await ensureWordReady(id);
+  if (!gameState || gameState.over || !gameState.target || gameState.target.id !== id) return false;
+  const ok = await playAudio("word-" + id);
+  return ok;
+}
 function runGame() {
   return new Promise(resolve => {
-    gameState = { stars: 0, combo: 0, correct: 0, sealedNew: 0, unsealedNew: 0, target: null, wrongs: 0, locked: false, over: false, resolve: resolve, timer: null, deadline: 0 };
+    gameState = { stars: 0, combo: 0, correct: 0, sealedNew: 0, unsealedNew: 0, target: null, wrongs: 0, locked: false, over: false, resolve: resolve, timer: null, deadline: 0, roundSeq: 0, wordHeard: false };
     $("game").classList.remove("hidden");
     startGameRound0();
   });
@@ -2146,6 +2204,8 @@ function nextRound() {
   const g = gameState;
   if (!g || g.over) return;
   g.locked = false; g.wrongs = 0;
+  g.roundSeq++; g.wordHeard = false; /* 新一轮：旧一轮挂起的自动播出全部作废 */
+  const seq = g.roundSeq;
   const t = pickTarget();
   g.target = t;
   const cards = shuffle([t].concat(shuffle(WORDS.filter(w => w.id !== t.id)).slice(0, 3)));
@@ -2170,13 +2230,15 @@ function nextRound() {
     if (lb) lb.classList.add("listen-pulse");
     return;
   }
-  /* 单词自动播：若两次播放都被拒（iOS 手势窗口），把小喇叭按钮抖起来提示孩子点它重听 */
+  /* 单词自动播：只播本轮目标词；本轮已答完/已换轮/已听过就不播（旧词不许漏进新一轮）。
+     若两次播放都被拒（iOS 手势窗口），把小喇叭按钮抖起来提示孩子点它重听 */
   setTimeout(() => {
-    if (!gameState || gameState.over) return;
+    if (!gameState || gameState.over || gameState.roundSeq !== seq) return;
     const lb = $("gameListen");
     if (lb) lb.classList.remove("listen-pulse");
-    playAudio("word-" + t.id).then(ok => {
-      if (!ok && gameState && !gameState.over) { const b = $("gameListen"); if (b) b.classList.add("listen-pulse"); }
+    if (gameState.wordHeard) return;
+    playGameWord(t.id).then(ok => {
+      if (!ok && gameState && !gameState.over && gameState.roundSeq === seq) { const b = $("gameListen"); if (b) b.classList.add("listen-pulse"); }
     });
   }, 300);
 }
@@ -2184,8 +2246,12 @@ $("gameListen").onclick = () => {
   unlockAudio();
   const b = $("gameListen");
   if (b) b.classList.remove("listen-pulse");
-  if (gameState) gameState.firstRound = false;
-  if (gameState && gameState.target && !gameState.over) playAudio("word-" + gameState.target.id);
+  const g = gameState;
+  /* 只播当轮目标词：轮次切换间隙（locked）不播旧词，新一轮 300ms 后自动播；
+     当轮词没就绪时 playGameWord 会先等它加载好，不拿旧音频顶上 */
+  if (!g || g.over || g.locked || !g.target) return;
+  g.firstRound = false;
+  playGameWord(g.target.id);
 };
 function gameTap(id, el) {
   unlockAudio();
@@ -2216,6 +2282,7 @@ function gameTap(id, el) {
     } else {
       $("gameMsg").textContent = "⭐ 答对啦！就是 “" + t.en + "”！";
     }
+    g.roundSeq++; /* 本轮已答完：挂起的自动播出作废，不许旧词漏进下一轮 */
     setTimeout(nextRound, 1000);
     return;
   }
@@ -2231,6 +2298,7 @@ function gameTap(id, el) {
     $("gameMsg").textContent = "“" + t.en + "” 被收进封印本啦 📕 记住它，下次把它救出来！";
     const right = $("gameCards").querySelector("[data-id='" + t.id + "']");
     if (right) right.classList.add("answer");
+    g.roundSeq++; /* 本轮已结束：挂起的自动播出作废 */
     setTimeout(nextRound, 1500);
   } else {
     $("gameMsg").textContent = "不是这个哦，再听一遍，救出 “" + t.en + "” 之前先认对它！";
@@ -2244,13 +2312,15 @@ function endGame() {
   $("timerNum").textContent = "时间到！";
   $("gamePlay").classList.add("hidden");
   if (g.stars > (save.best || 0)) { save.best = g.stars; persist(); }
-  $("gameEndTitle").textContent = g.stars >= 8 ? "🏆 抢答小明星！" : "🎉 抢答完成！";
+  $("gameEndTitle").textContent = g.stars >= 5 ? "🏆 抢答小明星！" : "🎉 抢答完成！";
   $("gameEndStats").innerHTML =
     "这一局拿到 ⭐ " + g.stars + " 颗星，答对 " + g.correct + " 次<br>" +
     (g.sealedNew ? "新封印 " + g.sealedNew + " 个词，已经收进封印本 📕<br>" : "") +
     (g.unsealedNew ? "解封了 " + g.unsealedNew + " 个词，太棒了！🔓<br>" : "") +
     "历史最佳 ⭐ " + save.best;
-  playAudio(g.stars >= 8 ? "mimi-game-end-good" : "mimi-game-end-ok");
+  /* 2026-11-26 第三轮：5 星即高分播表扬句（mimi-game-end-good），低于 5 星才播鼓励句
+     （mimi-game-end-ok 的“Good try…”台词）；旧门槛 8 星让拿 5 星的孩子也听到“下次再来” */
+  playAudio(g.stars >= 5 ? "mimi-game-end-good" : "mimi-game-end-ok");
   $("gameEnd").classList.remove("hidden");
 }
 $("gameAgain").onclick = () => { unlockAudio(); if (gameState) startGameRound0(); };
