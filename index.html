@@ -154,7 +154,8 @@
   .mic.preparing { background:#ffe1a8; animation:none; transform:scale(.93); }
   .micnote { font-size:12px; color:#7a6a45; line-height:1.5; }
   .micdiag { font-size:10px; color:#b9c2c9; margin-top:5px; min-height:13px; letter-spacing:.2px; }
-  .volbar { height:8px; width:180px; max-width:70%; margin:7px auto 0; background:#edf1ee; border-radius:99px; overflow:hidden; opacity:0; transition:opacity .2s; }
+  .volbar { height:14px; width:220px; max-width:82%; margin:8px auto 0; background:#e3e9e4; border:2px solid #bfe3d2; border-radius:99px; overflow:hidden; opacity:0; transition:opacity .2s; }
+  /* 2026-11-26：录音时唯一的实时反馈就是这条音量条——iOS 上做不了实时字幕，所以加粗加宽，让孩子看得见自己在出声。 */
   .volbar.show { opacity:1; }
   .volbar i { display:block; height:100%; width:100%; transform:scaleX(0); transform-origin:left center; background:linear-gradient(90deg,#57c98a,#ffd23e,#ff6b5e); border-radius:99px; transition:transform .09s linear; }
   .chips { margin-top:10px; display:none; }
@@ -257,6 +258,8 @@
   .game-prompt { display:flex; align-items:center; gap:10px; margin:8px 0 10px; }
   .game-sealtag { font-size:12px; font-weight:800; color:#6a34b0; background:#f7f0ff; border:2px solid #c9a7eb; border-radius:999px; padding:4px 10px; display:none; }
   .game-sealtag.show { display:inline-block; }
+  #gameListen.listen-pulse { animation:listenPulse .9s ease-in-out infinite; }
+  @keyframes listenPulse { 0%,100%{transform:scale(1);} 50%{transform:scale(1.12);} }
   .game-cards { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
   .gcard {
     border:3px solid #d9cba6; background:#fff; border-radius:16px; padding:14px 6px 11px;
@@ -369,7 +372,7 @@
       <div class="heard" id="heard">点麦克风，开口说英语</div>
       <div class="microw">
         <button class="mic" id="micBtn" aria-label="开口说">🎤</button>
-        <div class="micnote" id="micNote">点麦克风开始说，<br>说完再点一下 🎤</div>
+        <div class="micnote" id="micNote">点麦克风开始说，<br>说完会自动停，也可以点一下 🎤</div>
       </div>
       <div class="volbar" id="volBar"><i id="volFill"></i></div>
       <div class="micdiag" id="micDiag"></div>
@@ -670,18 +673,40 @@ function getAudio(f) {
   return AC[f];
 }
 
+/* 播放失败诊断环：iOS 真机上 play() 被拒是静默的（无声也无报错），记下来供
+   排查；最近 20 条挂在 window.__audioLog 上，不写进任何用户可见文案。 */
+function logAudioErr(file, err) {
+  try {
+    window.__audioLog = window.__audioLog || [];
+    window.__audioLog.push({ t: Date.now(), file, err: (err && err.name) || String(err) });
+    if (window.__audioLog.length > 20) window.__audioLog.shift();
+  } catch (e) {}
+}
 function playAudio(file) {
   return new Promise(resolve => {
     const a = getAudio(file);
     let done = false;
-    const fin = () => { if (!done) { done = true; a.removeEventListener("ended", fin); resolve(); } };
-    a.addEventListener("ended", fin);
-    a.addEventListener("error", fin);
+    const fin = ok => { if (!done) { done = true; a.removeEventListener("ended", finOk); a.removeEventListener("error", finBad); resolve(ok !== false); } };
+    const finOk = () => fin(true);
+    const finBad = () => fin(false);
+    a.addEventListener("ended", finOk);
+    a.addEventListener("error", finBad);
     /* iOS 上 ended 偶尔不触发：按音频时长设兜底超时，绝不让剧情等死 */
     const dur = isFinite(a.duration) && a.duration > 0 ? a.duration : 0;
-    setTimeout(fin, dur ? Math.min(15000, dur * 1000 + 3000) : 8000);
+    setTimeout(() => fin(true), dur ? Math.min(15000, dur * 1000 + 3000) : 8000);
     try { a.currentTime = 0; } catch (e) {}
-    a.play().catch(fin);
+    /* 2026-11-26：play() 被手势策略拒了就补一次（250ms 后，期间的手势可能
+       已续上窗口）；两次都拒才按失败收尾，调用方据此决定要不要提示孩子点喇叭 */
+    const tryPlay = isRetry => {
+      let p;
+      try { p = a.play(); } catch (e) { logAudioErr(file, e); if (!isRetry) setTimeout(() => { if (!done) tryPlay(true); }, 250); else fin(false); return; }
+      if (p && p.catch) p.catch(err => {
+        logAudioErr(file, err);
+        if (!isRetry) setTimeout(() => { if (!done) tryPlay(true); }, 250);
+        else fin(false);
+      });
+    };
+    tryPlay(false);
   });
 }
 
@@ -698,7 +723,16 @@ function playSfx(name) {
     const a = SFX[name];
     if (!a) return;
     try { a.currentTime = 0; } catch (e) {}
-    a.play().catch(() => {});
+    /* 2026-11-26：与 playAudio 同理，被拒补一次再放弃，拒绝原因进诊断环 */
+    const tryPlay = isRetry => {
+      let p;
+      try { p = a.play(); } catch (e) { logAudioErr("sfx/" + name, e); if (!isRetry) setTimeout(() => tryPlay(true), 250); return; }
+      if (p && p.catch) p.catch(err => {
+        logAudioErr("sfx/" + name, err);
+        if (!isRetry) setTimeout(() => tryPlay(true), 250);
+      });
+    };
+    tryPlay(false);
   } catch (e) {}
 }
 
@@ -960,7 +994,24 @@ async function primeVids(keys) {
     } catch (e) {}
   }
 }
+/* 音效也得在开始手势里点一次火：对话配音靠 primeAudios 解锁，音效之前没人点
+   过火，iOS 真机上首次在非手势里播会被拒（静默无声）。与对话同一手法：静音
+   点火 70ms 后暂停归零、取消静音。先于对话点火，离手势最近。 */
+function primeSfx() {
+  ensureSfx();
+  SFX_FILES.forEach(n => {
+    const a = SFX[n];
+    if (!a) return;
+    try {
+      a.muted = true;
+      const p = a.play();
+      if (p && p.catch) p.catch(() => {});
+      setTimeout(() => { try { a.pause(); a.currentTime = 0; a.muted = false; } catch (e) {} }, 70);
+    } catch (e) {}
+  });
+}
 async function primeMedia() {
+  primeSfx();
   await primeAudios(ACT1_AUDIO);
   await primeVids(["seg2", "seg3", "seg4", "seg5", "seg6"]);
 }
@@ -1419,7 +1470,7 @@ function childTurn(key) {
     $("sayBuilt").disabled = true;
     heardEl.textContent = "点麦克风，开口说英语";
     heardEl.classList.remove("got", "loud");
-    micNote.innerHTML = "点麦克风开始说，<br>说完再点一下 🎤";
+    micNote.innerHTML = "点麦克风开始说，<br>说完会自动停，也可以点一下 🎤";
     $("turnHint").innerHTML = currentTurn.hint;
     /* 提示系统复位：骨架卡回空白态，提示棒三星清空 */
     hintLevel = 0;
@@ -1550,13 +1601,18 @@ async function judge(raw) {
    这段判定录音同时就是鹦鹉的真声素材（全平台统一，含 iOS）。
    麦克风纪律沿用第二轮的代次守卫：同一时刻只准一路录音；停录立刻 stop
    tracks；teardown 时代次自增，让迟到的 getUserMedia 承诺与 onstop 回调
-   过期作废，绝不把占麦问题带回来。 */
+   过期作废，绝不把占麦问题带回来。
+   2026-11-26：说完自动停——复用音量条的 Analyser 电平，说过话后静音约 1.2 秒
+   即停录走判定；6 秒上限与手动点停保留。实时字幕：iOS Chrome 没有
+   SpeechRecognition；分片发服务器实测过——只有第一片能解码、且结果 5 秒多
+   才到，比孩子一句话还慢，所以不上分片；录音时的实时反馈就是音量条＋秒数。 */
 const ASR_URL = "https://huage-erp.kdns.fr/asr/transcribe?lang=en";
 const ASR_TOKEN = "9ab9b987c7e92ceb191670ce80726307";
 const REC_MAX_MS = 6000, ASR_FETCH_TIMEOUT_MS = 12000;
 let answerRec = null, answerStream = null, recGen = 0, recBusy = false;
 let recElapsedTimer = null, recAutoTimer = null, recStartStamp = 0;
 let meterCtx = null, meterTimer = null;
+let silenceSeen = false, silenceLastSpeech = 0; /* 静音自停状态：说过话＋静音计时 */
 
 function clearRecTimers() {
   if (recElapsedTimer) { clearInterval(recElapsedTimer); recElapsedTimer = null; }
@@ -1586,6 +1642,10 @@ function startMeter(stream) {
       let peak = 0;
       for (let i = 0; i < data.length; i++) { const v = Math.abs(data[i] - 128) / 128; if (v > peak) peak = v; }
       fill.style.transform = "scaleX(" + Math.min(1, peak * 1.5).toFixed(3) + ")";
+      /* 静音自停（2026-11-26）：说过话之后连续约 1.2 秒低于阈值就自动停录、
+         走现有的上传判定；没说过话不触发，6 秒上限与手动点停照旧。 */
+      if (peak > 0.08) { silenceSeen = true; silenceLastSpeech = Date.now(); }
+      else if (silenceSeen && Date.now() - silenceLastSpeech >= 1200) { stopAnswerRecording(); }
     }, 100);
   } catch (e) { fake = true; }
   if (fake) {
@@ -1642,13 +1702,14 @@ function startAnswerRecording() {
     recStartStamp = Date.now();
     micBtn.classList.remove("preparing");
     micBtn.classList.add("listening");
-    heardEl.textContent = "在录啦…说完再点一下麦克风 🎤";
-    micNote.innerHTML = "录音中 0 秒…<br>说完点一下麦克风";
+    heardEl.textContent = "在录啦…说完会自动停 🎤";
+    micNote.innerHTML = "录音中 0 秒…<br>说完会自动停，也可点一下麦克风";
     diagEvent("录音");
+    silenceSeen = false; silenceLastSpeech = 0;
     startMeter(stream);
     recElapsedTimer = setInterval(() => {
       const s = Math.floor((Date.now() - recStartStamp) / 1000);
-      micNote.innerHTML = "录音中 " + s + " 秒…<br>说完点一下麦克风";
+      micNote.innerHTML = "录音中 " + s + " 秒…<br>说完会自动停，也可点一下麦克风";
     }, 250);
     recAutoTimer = setTimeout(() => { stopAnswerRecording(); }, REC_MAX_MS);
   }).catch(() => {
@@ -1915,9 +1976,21 @@ function nextRound() {
   if (s && s.sealed) { tag.textContent = "📕 封印中的词！答对解封 +1 星（" + s.stars + "/3）"; tag.classList.add("show"); }
   else tag.classList.remove("show");
   $("gameMsg").textContent = "听一听，点出你听到的词！";
-  setTimeout(() => { if (gameState && !gameState.over) playAudio("word-" + t.id); }, 300);
+  /* 单词自动播：若两次播放都被拒（iOS 手势窗口），把小喇叭按钮抖起来提示孩子点它重听 */
+  setTimeout(() => {
+    if (!gameState || gameState.over) return;
+    const lb = $("gameListen");
+    if (lb) lb.classList.remove("listen-pulse");
+    playAudio("word-" + t.id).then(ok => {
+      if (!ok && gameState && !gameState.over) { const b = $("gameListen"); if (b) b.classList.add("listen-pulse"); }
+    });
+  }, 300);
 }
-$("gameListen").onclick = () => { if (gameState && gameState.target && !gameState.over) playAudio("word-" + gameState.target.id); };
+$("gameListen").onclick = () => {
+  const b = $("gameListen");
+  if (b) b.classList.remove("listen-pulse");
+  if (gameState && gameState.target && !gameState.over) playAudio("word-" + gameState.target.id);
+};
 function gameTap(id, el) {
   const g = gameState;
   if (!g || g.over || g.locked) return;
