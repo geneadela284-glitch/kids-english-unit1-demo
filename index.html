@@ -527,7 +527,7 @@
 "use strict";
 /* 构建版本（2026-11-27 第六轮）：每次发版改这个串；诊断角标每行都带它，
    任何一张截图都能证明跑的是哪个版本，旧缓存再也不会悄悄顶替新版。 */
-const BUILD_VERSION = "v7"; /* 第七轮：每次发版改这个串，诊断行带版本，截图一眼可辨 */
+const BUILD_VERSION = "v8"; /* 第八轮：每次发版改这个串，诊断行带版本，截图一眼可辨 */
 const $ = id => document.getElementById(id);
 const caption = $("caption"), capWho = $("capWho"), capLine = $("capLine");
 const turnEl = $("turn"), heardEl = $("heard"), micBtn = $("micBtn"), micNote = $("micNote");
@@ -2406,6 +2406,9 @@ async function startWordPrep() {
   g.prepping = false;
   if (r.ok) {
     g.wordsReady = true;
+    /* 补下前点按已把单词元素建成了直连源（handler 开头的 primeGameWords 先跑）：
+       删掉缓存，下次取元素时按新 blob 重建——否则补下的 blob 白下、播出仍走直连慢路 */
+    WORD_FILES.forEach(f => { try { delete AC["word-" + f]; } catch (e) {} });
     startGameRound0();
   } else {
     g.wordsReady = false;
