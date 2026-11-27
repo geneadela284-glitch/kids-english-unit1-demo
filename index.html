@@ -527,7 +527,7 @@
 "use strict";
 /* 构建版本（2026-11-27 第六轮）：每次发版改这个串；诊断角标每行都带它，
    任何一张截图都能证明跑的是哪个版本，旧缓存再也不会悄悄顶替新版。 */
-const BUILD_VERSION = "v6";
+const BUILD_VERSION = "v7"; /* 第七轮：每次发版改这个串，诊断行带版本，截图一眼可辨 */
 const $ = id => document.getElementById(id);
 const caption = $("caption"), capWho = $("capWho"), capLine = $("capLine");
 const turnEl = $("turn"), heardEl = $("heard"), micBtn = $("micBtn"), micNote = $("micNote");
@@ -795,6 +795,10 @@ function playAudio(file, opts) {
     /* strict（单词播出专用，2026-11-27 第五轮）：没响就是失败——stalled/play-hang/
        watchdog 到点未播完一律按失败结算，不许以“放行”当成功；对话配音保持旧行为（剧情不等死）。 */
     const strict = !!(opts && opts.strict);
+    /* 慢网给够时间（2026-11-27 第七轮）：单词是 7KB 小文件，直连现拉时 play() 承诺
+       2 秒未 settle 很常见——对话保持 2 秒（回答后停顿不能等），单词放宽到 5 秒，
+       免得慢网下每句都被误判 play-hang。 */
+    const playHangMs = (opts && opts.playHangMs) || 2000;
     let a = getAudio(file);
     let done = false, started = false, playSettled = false, endedOk = false;
     let lastCt = 0, lastAdvance = 0, playAttemptAt = performance.now();
@@ -842,7 +846,7 @@ function playAudio(file, opts) {
       const ct = a.currentTime || 0;
       if (ct > lastCt + 0.03) { lastCt = ct; lastAdvance = performance.now(); }
       if (started && performance.now() - lastAdvance > 1000) { fin(!strict, "stalled"); return; }
-      if (!playSettled && performance.now() - playAttemptAt > 2000) { fin(!strict, "play-hang"); return; }
+      if (!playSettled && performance.now() - playAttemptAt > playHangMs) { fin(!strict, "play-hang"); return; }
     }, 250);
     /* 兜底看门狗：时长已知时按 dur+3s（上限 12s）；时长未知（元数据未到）先等
        loadedmetadata（最多 2s），再按实际时长算；元数据一直不到则按 9s 兜底。
@@ -2290,7 +2294,10 @@ function ensureWordReady(id) {
     const fin2 = v => { if (!done) { done = true; resolve(v); } };
     a.addEventListener("canplay", () => fin2(true), { once: true });
     a.addEventListener("error", () => fin2(false), { once: true });
-    setTimeout(() => fin2(a.readyState >= 2), 1500);
+    /* 慢网给够时间（2026-11-27 第七轮）：直连现拉时元数据 1.5 秒到不了很常见，
+       旧版到点就判没就绪、播出直接走兜底；现在等 5 秒。点按路径已不用这条路
+       （第六轮改成同步起播），这里只服务 300ms 自动播。 */
+    setTimeout(() => fin2(a.readyState >= 2), 5000);
   });
 }
 async function playGameWord(id) {
@@ -2299,7 +2306,7 @@ async function playGameWord(id) {
   g.wordClaimed = true; /* 本轮已认领：300ms 自动播不再重复起播；失败时清掉，自动播/再点才能重试 */
   await ensureWordReady(id);
   if (!gameState || gameState.over || !gameState.target || gameState.target.id !== id) return false;
-  const ok = await playAudio("word-" + id, { strict: true });
+  const ok = await playAudio("word-" + id, { strict: true, playHangMs: 5000 });
   if (ok) { g.wordHeard = true; return true; }
   g.wordClaimed = false;
   return false;
@@ -2354,16 +2361,66 @@ async function playGameWordNow(id) {
      所以桌面验不到。元素没就绪时直接 play() 也能在手势里占住播出权，数据到了
      就响；2 秒没 settle 看门狗会按失败算，提示里点一下能重播。 */
   g.wordClaimed = true;
-  const ok = await playAudio("word-" + id, { strict: true });
+  const ok = await playAudio("word-" + id, { strict: true, playHangMs: 5000 });
   if (ok) { g.wordHeard = true; return true; }
   g.wordClaimed = false;
   return false;
 }
+/* ---------- 抢答前先把 16 个单词的本地音频备齐（2026-11-27 第七轮） ----------
+   真机根因（代码证实）：word-* 在第一阶段末尾下载，慢网下最容易 15 秒判死；
+   开始按钮照样放行（"大部分装好啦"），失败文件第一幕里没有任何后台续装
+   （只有断网恢复事件和手动重试会触发 healFailed），游戏也没有 blob 齐全校验
+   ——缺失的词每次播出都走直连现拉，慢网下 ensureWordReady 1.5s 超时 → play-hang
+   2s → 重试 → 换直连重建 → 看门狗最长 12s，点一下十几秒没反应或直接失败。
+   修法：进抢答先补下缺失的词（可见进度，下好再开局；下不下来明说、点喇叭重试）。 */
+async function ensureWordBlobs(onProgress) {
+  const missing0 = WORD_FILES.filter(f => !blobURLs["audio/" + f]);
+  if (!missing0.length) return { ok: true, missing: [] };
+  let done = 0;
+  const total = missing0.length;
+  const jobs = missing0.map(async f => {
+    try {
+      const u = await fetchAsBlobURL(A(f));
+      blobURLs["audio/" + f] = u;
+      done++;
+      if (onProgress) onProgress(done, total);
+      return true;
+    } catch (e) { return false; }
+  });
+  /* 最多等 20 秒：还下不完的就先报缺失、给重试，别让孩子干等；没下完的下载
+     还在后台跑，点重试时可能已经好了 */
+  await Promise.race([Promise.all(jobs), sleep(20000)]);
+  const stillMissing = WORD_FILES.filter(f => !blobURLs["audio/" + f]);
+  return { ok: !stillMissing.length, missing: stillMissing };
+}
+async function startWordPrep() {
+  const g = gameState;
+  if (!g || g.over) return;
+  g.prepping = true;
+  const lb = $("gameListen");
+  $("gameMsg").textContent = "正在准备单词…";
+  const r = await ensureWordBlobs((done, total) => {
+    if (gameState === g && !g.over) $("gameMsg").textContent = "正在准备单词… " + done + "/" + total;
+  });
+  if (gameState !== g || g.over) return;
+  g.prepping = false;
+  if (r.ok) {
+    g.wordsReady = true;
+    startGameRound0();
+  } else {
+    g.wordsReady = false;
+    $("gameMsg").textContent = "⚠️ 有 " + r.missing.length + " 个单词没下好，点 🔊 再试一次";
+    if (lb) lb.classList.add("listen-pulse");
+  }
+}
 function runGame() {
   return new Promise(resolve => {
-    gameState = { stars: 0, combo: 0, correct: 0, sealedNew: 0, unsealedNew: 0, target: null, wrongs: 0, locked: false, over: false, resolve: resolve, timer: null, deadline: 0, roundSeq: 0, wordHeard: false, wordClaimed: false };
+    gameState = { stars: 0, combo: 0, correct: 0, sealedNew: 0, unsealedNew: 0, target: null, wrongs: 0, locked: false, over: false, resolve: resolve, timer: null, deadline: 0, roundSeq: 0, wordHeard: false, wordClaimed: false, wordsReady: false, prepping: false };
     $("game").classList.remove("hidden");
-    startGameRound0();
+    /* 上一局结束幕可能还亮着：先切回游戏面板，再准备单词 */
+    $("gameEnd").classList.add("hidden");
+    $("gamePlay").classList.remove("hidden");
+    startWordPrep();
   });
 }
 function startGameRound0() {
@@ -2431,21 +2488,28 @@ function nextRound() {
     if (gameState.wordHeard || gameState.wordClaimed) return;
     playGameWord(t.id).then(ok => {
       if (!ok && gameState && !gameState.over && gameState.roundSeq === seq) gameWordFailed(seq);
-    });
+    }).catch(() => { if (gameState && !gameState.over && gameState.roundSeq === seq) gameWordFailed(seq); });
   }, 300);
 }
 $("gameListen").onclick = () => {
   unlockAudio();
   primeGameWords(); /* 手势里同步续火：单词元素重新在手势里播过 */
   const b = $("gameListen");
-  if (b) b.classList.remove("listen-pulse");
+  /* 点按立刻有可见反馈（2026-11-27 第七轮）：不管播出成败，喇叭先抖一下、文案先变
+     ——旧版点按后要等播出结算（慢网最长十几秒）才有任何反应，看起来像按钮死了 */
+  if (b) { b.classList.remove("listen-pulse"); void b.offsetWidth; b.classList.add("listen-pulse"); }
   const g = gameState;
-  /* 只播当轮目标词：轮次切换间隙（locked）不播旧词，新一轮 300ms 后自动播；
-     元素就绪时同步起播（不等 await），iOS 手势窗口内一定能响；失败时喇叭抖动＋文字提示 */
-  if (!g || g.over || g.locked || !g.target) return;
+  if (!g || g.over) return; /* 回合还没开始/已结束：抖一下表示点到了 */
+  if (g.wordsReady === false && !g.prepping) { startWordPrep(); return; } /* 单词没下好：点按=重试补下 */
+  if (g.prepping) { $("gameMsg").textContent = "正在准备单词，马上就好…"; return; }
+  if (g.locked || !g.target) { if (g.locked) $("gameMsg").textContent = "等一下，马上出下一题…"; return; }
   g.firstRound = false;
   const seq = g.roundSeq;
-  playGameWordNow(g.target.id).then(ok => { if (!ok) gameWordFailed(seq); });
+  $("gameMsg").textContent = "🔊 正在放给你听…";
+  playGameWordNow(g.target.id).then(ok => {
+    if (ok) { if (b) b.classList.remove("listen-pulse"); }
+    else gameWordFailed(seq);
+  }).catch(() => gameWordFailed(seq));
 };
 function gameTap(id, el) {
   unlockAudio();
