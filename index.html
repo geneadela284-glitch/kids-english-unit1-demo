@@ -531,7 +531,7 @@
 /* 构建版本（2026-11-27 第六轮）：每次发版改这个串；诊断角标每行都带它，
    任何一张截图都能证明跑的是哪个版本，旧缓存再也不会悄悄顶替新版。 */
 /* v13（2026-11-28）：回滚 v12，恢复 v11 的声音；除版本号外内容与 v11 字节一致。 */
-const BUILD_VERSION = "v14"; /* 第十四轮：每次发版改这个串，诊断行带版本，截图一眼可辨 */
+const BUILD_VERSION = "v15"; /* 第十五轮：每次发版改这个串，诊断行带版本，截图一眼可辨 */
 const $ = id => document.getElementById(id);
 const caption = $("caption"), capWho = $("capWho"), capLine = $("capLine");
 const turnEl = $("turn"), heardEl = $("heard"), micBtn = $("micBtn"), micNote = $("micNote");
@@ -615,8 +615,18 @@ async function showSeg(key, t) {
        没数据就 load 并等首帧（有界 2000ms），再把时间拨到目标点等 seeked。 */
     if (v.readyState < 2) { try { v.load(); } catch (e) {} await waitEvent(v, "loadeddata", 2000); }
     if (v.readyState < 2) {
-      try { micDiag.mediaFail = "seg-" + key + " no-frame"; renderDiag(); } catch (e) {}
-      return v;
+      /* v15：blob 源无帧时换直连地址重试一次（只做一次） */
+      try {
+        if (v.src && v.src.indexOf("blob:") === 0 && SEGFILES[key]) {
+          v.src = "clips/" + SEGFILES[key];
+          try { v.load(); } catch (e2) {}
+          await waitEvent(v, "loadeddata", 2000);
+        }
+      } catch (e) {}
+      if (v.readyState < 2) {
+        try { micDiag.vidFail = "seg-" + key + " no-frame"; renderDiag(); } catch (e) {}
+        return v;
+      }
     }
     try { if (Math.abs(v.currentTime - target) > 0.15) { v.currentTime = target; await waitEvent(v, "seeked", 1200); } } catch (e) {}
     return v;
@@ -626,9 +636,19 @@ async function showSeg(key, t) {
   if (!v.src) { const bu = blobURLs["clips/" + key]; if (bu) v.src = bu; }
   if (v.src && v.readyState < 2) { try { v.load(); } catch (e) {} await waitEvent(v, "loadeddata", 2000); }
   if (!v.src || v.readyState < 2) {
-    /* 第十轮：没帧不切——旧帧留在台上，黑屏比旧帧更糟；失败写进诊断，剧情照走 */
-    try { micDiag.mediaFail = "seg-" + key + " no-frame"; renderDiag(); } catch (e) {}
-    return v;
+    /* v15：blob 源无帧时换直连地址重试一次（只做一次） */
+    try {
+      if (v.src && v.src.indexOf("blob:") === 0 && SEGFILES[key]) {
+        v.src = "clips/" + SEGFILES[key];
+        try { v.load(); } catch (e2) {}
+        await waitEvent(v, "loadeddata", 2000);
+      }
+    } catch (e) {}
+    if (!v.src || v.readyState < 2) {
+      /* 第十轮：没帧不切——旧帧留在台上，黑屏比旧帧更糟；失败写进诊断，剧情照走 */
+      try { micDiag.vidFail = "seg-" + key + " no-frame"; renderDiag(); } catch (e) {}
+      return v;
+    }
   }
   try { if (Math.abs(v.currentTime - target) > 0.15) { v.currentTime = target; await waitEvent(v, "seeked", 1200); } } catch (e) {}
   transitionUntil = performance.now() + 700;
@@ -1656,6 +1676,8 @@ function findPhaseJob(key) {
 function diagMediaFail(what, why) {
   try {
     micDiag.mediaFail = what + " " + why;
+    /* v15：失败标志分开、变粘性——视频和配音各记各的，互不擦除 */
+    if (String(what).indexOf("seg-") === 0) micDiag.vidFail = what + " " + why; else micDiag.audFail = what + " " + why;
     audioLog({ file: what, src: "—", result: "media-not-ready:" + why, ended: false, ctMoved: false, ms: 0, st: "?" });
     renderDiag();
   } catch (e) {}
@@ -1665,7 +1687,7 @@ async function ensureSegReady(key) {
   if (blobURLs[k]) {
     const v = vids[key];
     if (v && !v.src) { try { v.src = blobURLs[k]; } catch (e) {} }
-    micDiag.mediaFail = null;
+    micDiag.vidFail = null;
     return true;
   }
   const found = findPhaseJob(k);
@@ -1682,7 +1704,7 @@ async function ensureSegReady(key) {
     if (v.readyState < 2) { try { v.load(); await waitEvent(v, "loadeddata", 5000); } catch (e) {} }
     if (v.readyState < 2) { diagMediaFail("seg-" + key, "no-frame"); return false; }
   }
-  micDiag.mediaFail = null;
+  micDiag.vidFail = null;
   return true;
 }
 async function ensureAudioReady(file) {
@@ -1691,7 +1713,7 @@ async function ensureAudioReady(file) {
     /* 缓存元素可能还是旧的直连 src（blob 是后到的）：换成 blob 元素再播 */
     const a = AC[file];
     if (a && audioSrcKind(a.src) !== "blob") { try { a.pause(); a.removeAttribute("src"); a.load(); } catch (e) {} delete AC[file]; }
-    micDiag.mediaFail = null;
+    micDiag.audFail = null;
     return true;
   }
   const found = findPhaseJob(k);
@@ -1704,7 +1726,7 @@ async function ensureAudioReady(file) {
   hideStageLoading();
   if (!ok) { diagMediaFail(file, "download-fail"); return false; }
   const a = getAudio(file);
-  if (a.readyState >= 2) { micDiag.mediaFail = null; return true; }
+  if (a.readyState >= 2) { micDiag.audFail = null; return true; }
   const ready = await new Promise(res => {
     let done = false;
     const fin2 = v => { if (!done) { done = true; res(v); } };
@@ -1713,7 +1735,7 @@ async function ensureAudioReady(file) {
     setTimeout(() => fin2(a.readyState >= 2), 5000);
   });
   if (!ready) { diagMediaFail(file, "not-ready"); return false; }
-  micDiag.mediaFail = null;
+  micDiag.audFail = null;
   return true;
 }
 /* 播放一段动画：Blob 本地播放＋看门狗护航；配音按 delay/at 调度对齐嘴动窗口 */
@@ -2498,13 +2520,15 @@ micBtn.onclick = () => {
 };
 
 /* ---------- 麦克风诊断角标：记录最近一次识别的事件链，华哥截图就能回报 ---------- */
-const micDiag = { turn: "-", events: [], watchdog: 0, lastTurn: null };
+const micDiag = { turn: "-", events: [], watchdog: 0, lastTurn: null, vidFail: null, audFail: null };
 function renderDiag() {
   const el = $("micDiag");
   let txt = "🎤 " + BUILD_VERSION + " · " + micDiag.turn + (micDiag.events.length ? "：" + micDiag.events.join(" → ") : "");
   if (window.__audioFailCount) txt += " | 🔊音频失败×" + window.__audioFailCount + "（最近：" + window.__audioLastFail + "）";
   if (micDiag.wordFail) txt += " | 🔊单词失败：" + micDiag.wordFail;
   if (micDiag.mediaFail) txt += " | 📦媒体未就绪：" + micDiag.mediaFail;
+  if (micDiag.vidFail) txt += " | 📦视频未就绪：" + micDiag.vidFail;
+  if (micDiag.audFail) txt += " | 📦配音未就绪：" + micDiag.audFail;
   const lt = micDiag.lastTurn;
   if (lt) {
     const s = v => (v == null ? "?" : (v / 1000).toFixed(1) + "s");
@@ -2512,6 +2536,20 @@ function renderDiag() {
       "（上传" + s(lt.upload) + "/转写" + s(lt.transcribe) + "/判定" + s(lt.judge) + "）" +
       (lt.retry ? "·重试" : "") + (lt.status && lt.status !== "ok" ? "·" + lt.status : "");
   }
+  /* v15：诊断行追加直播状态——当前在台视频与 AudioContext 状态，轻量、不抛错 */
+  try {
+    let vs = " | vid —";
+    if (activeVid) {
+      let vk = "?";
+      for (const k in vids) { if (vids[k] === activeVid) { vk = k; break; } }
+      const src = activeVid.src || "";
+      const sk = src.indexOf("blob:") === 0 ? "blob" : (src.indexOf("http") === 0 ? "http" : "none");
+      vs = " | vid " + vk + " on=" + (activeVid.classList.contains("on") ? 1 : 0) +
+        " rs=" + activeVid.readyState + " paused=" + (activeVid.paused ? 1 : 0) +
+        " ct=" + activeVid.currentTime.toFixed(2) + " w=" + activeVid.videoWidth + " src=" + sk;
+    }
+    txt += vs + " | ctx=" + (window.__wordCtx ? window.__wordCtx.state : "none");
+  } catch (e) {}
   if (el) el.textContent = txt;
   const gd = $("gameDiag");
   if (gd) gd.textContent = txt; /* 2026-11-26 第三轮：游戏进行时回合面板被游戏盖住，诊断行在游戏里也要看得见——
