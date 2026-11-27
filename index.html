@@ -159,6 +159,9 @@
   .mic.preparing { background:#ffe1a8; animation:none; transform:scale(.93); }
   .micnote { font-size:12px; color:#7a6a45; line-height:1.5; }
   .micdiag { font-size:10px; color:#7a8890; margin-top:5px; min-height:13px; letter-spacing:.2px; } /* 2026-11-27 第四轮：旧色 #b9c2c9 在浅色面板上几乎看不见，Mac 复演在所有状态都没找到诊断区——加深到浅底深底都可读 */
+  /* 对话播出失败提示（2026-11-27 第六轮）：置顶横幅，盖过所有幕布，点一下就在手势里重解锁、重播那句 */
+  .audioretry { position:fixed; top:10px; left:12px; right:12px; z-index:50; padding:13px 10px; font-size:16px; font-weight:900; color:#fff; background:#c0392b; border:none; border-radius:12px; box-shadow:0 4px 16px rgba(0,0,0,.45); }
+  .audioretry:active { transform:translateY(2px); }
   .volbar { height:14px; width:220px; max-width:82%; margin:8px auto 0; background:#e3e9e4; border:2px solid #bfe3d2; border-radius:99px; overflow:hidden; opacity:0; transition:opacity .2s; }
   /* 2026-11-26：录音时唯一的实时反馈就是这条音量条——iOS 上做不了实时字幕，所以加粗加宽，让孩子看得见自己在出声。 */
   .volbar.show { opacity:1; }
@@ -348,6 +351,7 @@
 </head>
 <body>
 <div class="app">
+  <button class="audioretry hidden" id="audioRetry">🔇 刚才那句没出声，点一下重听</button>
   <div class="topbar">
     <div class="ttl"><span id="ttlMain">开学第一天 · 第 1 集 <small>七上 Unit 1《You and Me》第一幕</small></span><button id="bookBtn">📖 贴纸册<span id="sealBadge"></span></button></div>
     <div class="card">
@@ -508,6 +512,7 @@
         <div class="loadbar"><i id="act2Fill"></i></div>
         <div class="loadtxt" id="act2LoadTxt">正在准备第二幕…</div>
       </div>
+      <button class="big hidden" id="act2GoBtn">✅ 教室准备好了，点一下进入</button>
       <div class="loadfail hidden" id="act2Fail">
         <div class="lf-title">这几个小文件没装好：</div>
         <div class="lf-list" id="act2FailList"></div>
@@ -520,6 +525,9 @@
 
 <script>
 "use strict";
+/* 构建版本（2026-11-27 第六轮）：每次发版改这个串；诊断角标每行都带它，
+   任何一张截图都能证明跑的是哪个版本，旧缓存再也不会悄悄顶替新版。 */
+const BUILD_VERSION = "v6";
 const $ = id => document.getElementById(id);
 const caption = $("caption"), capWho = $("capWho"), capLine = $("capLine");
 const turnEl = $("turn"), heardEl = $("heard"), micBtn = $("micBtn"), micNote = $("micNote");
@@ -746,6 +754,41 @@ function audioLog(entry) {
   } catch (e) {}
 }
 function audioSrcKind(url) { return (url && url.indexOf("blob:") === 0) ? "blob" : "direct"; }
+/* 失败时记下元素的即时状态（静音？暂停？播到哪？元数据到了没）——拒因光写
+   NotAllowedError 不够，定位要看元素当时是什么状态 */
+function audioState(a) {
+  try { return "muted=" + (a.muted ? 1 : 0) + " paused=" + (a.paused ? 1 : 0) + " ct=" + (a.currentTime || 0).toFixed(2) + " rs=" + a.readyState; }
+  catch (e) { return "?"; }
+}
+/* ---------- 对话播出失败必须看得见、可重播（2026-11-27 第六轮） ----------
+   代码证实的根因：playSegment/speakOver/judge 全都忽略 playAudio 的返回值；
+   录音打断 iOS 音频会话后，非手势的下一句配音被拒，fin(false) 只记进
+   __audioLog 与诊断角标，用户眼前字幕照走、课照上——整段后半程静悄悄没声。
+   修法：对话（非单词）播出在“一次都没响起来”（started=false）时失败，立刻亮
+   出置顶可点横幅；点它就在手势里重新解锁并重播那句；响了就自动收起。
+   被录音打断而停滞的句子（started=true，stalled）不算——那句已经响过一半，
+   是用户自己点麦克风打断的。单词走游戏自己的 gameWordFailed，这里不重复提示。 */
+let __audioRetryFile = null;
+function showAudioRetry(file, result) {
+  __audioRetryFile = file;
+  window.__audioRetryFile = file; /* 挂到 window 上：测试与真机诊断都能直接读到当前要重播的是哪句 */
+  const b = $("audioRetry");
+  if (!b) return;
+  b.textContent = "🔇 刚才那句没出声，点一下重听";
+  b.classList.remove("hidden");
+}
+function hideAudioRetry() {
+  __audioRetryFile = null;
+  window.__audioRetryFile = null;
+  const b = $("audioRetry");
+  if (b) b.classList.add("hidden");
+}
+$("audioRetry").onclick = () => {
+  unlockAudio(); /* 手势里先续上会话，再重播那句 */
+  const f = __audioRetryFile;
+  if (!f) { hideAudioRetry(); return; }
+  playAudio(f).then(ok => { if (ok) hideAudioRetry(); });
+};
 function playAudio(file, opts) {
   return new Promise(resolve => {
     ttStampNext(); /* 判定完成后首次起播：就是下一句的起点 */
@@ -762,12 +805,28 @@ function playAudio(file, opts) {
       try { a.removeEventListener("ended", finOk); a.removeEventListener("error", finBad); } catch (e) {}
       const moved = (a.currentTime || 0) > 0.05;
       const effResult = result || (ok ? "ok" : "fail");
-      const entry = { file, src: audioSrcKind(a.src), result: effResult, ended: endedOk, ctMoved: moved, ms: Math.round(performance.now() - startedAt) };
+      const entry = { file, src: audioSrcKind(a.src), result: effResult, ended: endedOk, ctMoved: moved, ms: Math.round(performance.now() - startedAt), st: audioState(a) };
       if (note) entry.note = note;
       audioLog(entry);
+      /* 对话（非单词）播出在“一次都没响起来”时失败：立刻亮出可点横幅，点它重听；
+         响了就自动收起。被录音打断而停滞的句子（started=true）不算——那句已经响过，
+         是用户自己点麦克风打断的。单词走游戏自己的 gameWordFailed，这里不重复提示。 */
+      if (file.indexOf("word-") !== 0) {
+        if (!ok && !started) showAudioRetry(file, effResult);
+        else if (ok) hideAudioRetry();
+      }
       if (file.indexOf("word-") === 0) {
-        if (effResult === "ok") window.__wordOkCount++;
-        else window.__wordFailCount++;
+        if (effResult === "ok") {
+          window.__wordOkCount++;
+          /* 响了：上一条单词失败明细清掉，别让旧失败留在诊断行里误导下一张截图 */
+          micDiag.wordFail = null; renderDiag();
+        } else {
+          window.__wordFailCount++;
+          /* 单词播出失败自己开口说话（2026-11-27 第六轮）：文件名＋拒因＋源＋元素即时
+             状态全写进诊断行，下一张截图就能直接定位，不用再猜是哪个词、为什么没响 */
+          micDiag.wordFail = file + " " + effResult + " " + audioSrcKind(a.src) + " " + audioState(a);
+          renderDiag();
+        }
       }
       resolve(ok !== false);
     };
@@ -822,10 +881,10 @@ function playAudio(file, opts) {
     };
     const onPlayFail = (err, isRetry, isFallback) => {
       playSettled = true;
-      audioLog({ file, src: audioSrcKind(a.src), result: "rejected:" + ((err && err.name) || String(err)), ended: false, ctMoved: false, ms: Math.round(performance.now() - startedAt) });
+      audioLog({ file, src: audioSrcKind(a.src), result: "rejected:" + ((err && err.name) || String(err)), ended: false, ctMoved: false, ms: Math.round(performance.now() - startedAt), st: audioState(a) });
       if (!isRetry) { setTimeout(() => { if (!done) tryPlay(true, isFallback); }, 250); return; }
       if (!isFallback) { tryFallback("play-rejected"); return; }
-      fin(false);
+      fin(false, "rejected:" + ((err && err.name) || String(err))); /* 兜底走完仍失败：把拒因写进结算结果，别只留一个没信息的 "fail"（诊断行要靠它定位） */
     };
     const tryFallback = why => {
       /* blob 源失败 → 换直连 URL 重建元素再播一次；直连也失败才认失败 */
@@ -842,7 +901,7 @@ function playAudio(file, opts) {
           return;
         } catch (e) {}
       }
-      fin(false);
+      fin(false, why);
     };
     tryPlay(false, false);
   });
@@ -1109,8 +1168,8 @@ $("act2RetryBtn").onclick = async () => {
   await createPhaseAudios(ACT2_AUDIO);
   markAct2Ready();
   if (act2Ready && !$("act2LoadVeil").classList.contains("hidden")) {
-    $("act2LoadVeil").classList.add("hidden");
-    playAct2();
+    /* 重试的点按手势早被前面的 await 耗掉了：只亮“点一下进入”，不直接进第二幕 */
+    showAct2Go();
   }
 };
 /* 断网自愈：加载途中网络断了，失败文件会列名＋可手动重试（已有）；网络一回来，
@@ -1135,8 +1194,8 @@ async function healFailed() {
       markAct2Ready();
       phaseRender(phase2);
       if (act2Ready && !$("act2LoadVeil").classList.contains("hidden")) {
-        $("act2LoadVeil").classList.add("hidden");
-        playAct2();
+        /* 断网恢复是非手势回调：只亮“点一下进入”，绝不直接进第二幕 */
+        showAct2Go();
       }
     }
   } catch (e) {}
@@ -2049,8 +2108,9 @@ micBtn.onclick = () => {
 const micDiag = { turn: "-", events: [], watchdog: 0, lastTurn: null };
 function renderDiag() {
   const el = $("micDiag");
-  let txt = "🎤 " + micDiag.turn + (micDiag.events.length ? "：" + micDiag.events.join(" → ") : "");
+  let txt = "🎤 " + BUILD_VERSION + " · " + micDiag.turn + (micDiag.events.length ? "：" + micDiag.events.join(" → ") : "");
   if (window.__audioFailCount) txt += " | 🔊音频失败×" + window.__audioFailCount + "（最近：" + window.__audioLastFail + "）";
+  if (micDiag.wordFail) txt += " | 🔊单词失败：" + micDiag.wordFail;
   const lt = micDiag.lastTurn;
   if (lt) {
     const s = v => (v == null ? "?" : (v / 1000).toFixed(1) + "s");
@@ -2253,7 +2313,8 @@ async function playGameWord(id) {
    根治：单词播出走一条不依赖“上次点火还热着”的路——
    (1) 每局开局＋每次点按手势里，同步把 16 个 word-* 元素静音点火一次
        （静音播出手势豁免，随时能点火；游戏里没有录音再打断，一局内点火一直有效）；
-   (2) 喇叭点按时元素就绪就同步起播，不先 await；
+   (2) 喇叭点按时同步起播，不先 await（第六轮修正：就绪与否都同步起播，冷元素
+       也不等 ensureWordReady——旧版冷元素先等 1.5s 再播，已出手势窗口，真机必拒）；
    (3) 单词播出用 strict 模式：没响就是失败，不许以“放行”当成功；
    (4) 播失败时页面看得见（喇叭抖动＋文字提示），点得了（再点重播）。 */
 const WORD_FILES = WORDS.map(w => "word-" + w.id);
@@ -2287,16 +2348,16 @@ function gameWordFailed(seq) {
 async function playGameWordNow(id) {
   const g = gameState;
   if (!g || g.over || !g.target || g.target.id !== id) return false;
-  const a = getAudio("word-" + id);
-  if (a && a.readyState >= 2) {
-    /* 元素已就绪：同步起播——play() 就发生在手势处理函数里，iOS 拒不掉 */
-    g.wordClaimed = true;
-    const ok = await playAudio("word-" + id, { strict: true });
-    if (ok) { g.wordHeard = true; return true; }
-    g.wordClaimed = false;
-    return false;
-  }
-  return playGameWord(id);
+  /* 喇叭点按必须同步起播——不管元素就绪与否（2026-11-27 第六轮修正）：
+     旧版元素没就绪时先 await ensureWordReady（最长 1.5s），真正 play() 时已出在
+     手势窗口之外，真机上必被拒；桌面上元素永远是就绪的，这条路从来没跑过，
+     所以桌面验不到。元素没就绪时直接 play() 也能在手势里占住播出权，数据到了
+     就响；2 秒没 settle 看门狗会按失败算，提示里点一下能重播。 */
+  g.wordClaimed = true;
+  const ok = await playAudio("word-" + id, { strict: true });
+  if (ok) { g.wordHeard = true; return true; }
+  g.wordClaimed = false;
+  return false;
 }
 function runGame() {
   return new Promise(resolve => {
@@ -2307,6 +2368,7 @@ function runGame() {
 }
 function startGameRound0() {
   const g = gameState;
+  micDiag.wordFail = null; /* 新一局：上一局的单词失败明细清掉，别留在诊断行里 */
   primeGameWords(); /* 开局就把 16 个单词音重新点火：上一幕的录音/视频打断后旧点火已作废 */
   g.stars = 0; g.combo = 0; g.correct = 0; g.sealedNew = 0; g.unsealedNew = 0; g.over = false;
   g.firstRound = true; /* 2026-11-26 第二轮：每局首轮单词不自动播，等孩子点小喇叭的手势触发——
@@ -2752,21 +2814,23 @@ async function playAct2() {
   if (!act2Primed) {
     const myToken = ++act2WaitToken;
     if (!act2Ready) {
-      /* 第二幕还没装齐：亮出它自己的加载幕等齐，进度和失败名单都在幕上，不让孩子干等死按钮 */
+      /* 第二幕还没装齐：亮加载幕等齐，但绝不在这里接着 prime——await 之后已出在
+         手势之外，真机上点火全被拒，第二幕整段没声。等齐后只亮“点一下进入”
+         按钮，点它再进（那时已是新手势，prime 全在手势里）。 */
       phaseRender(phase2);
       $("act2LoadVeil").classList.remove("hidden");
       await phase2.promise;
       markAct2Ready();
       if (myToken !== act2WaitToken) return; /* 孩子中途回第一幕了 */
       if (!act2Ready) { phaseRender(phase2); return; } /* 失败名单留在幕上，等重试/取消 */
-      $("act2LoadTxt").textContent = "正在把教室准备好…";
+      showAct2Go();
+      return;
     } else {
       $("act2LoadTxt").textContent = "正在把教室准备好…";
       $("act2LoadVeil").classList.remove("hidden");
     }
     await primeAudios(ACT2_AUDIO);
     primeSfx(); /* 第二幕入口重 prime 音效：第一幕录了多轮音后，会话可能已被打断过 */
-    primeGameWords(); /* 单词音也重 prime：不然最后一局抢答时它们还是开局那次冷点火 */
     await primeVids(ACT2_SEGS);
     $("act2LoadVeil").classList.add("hidden");
     if (myToken !== act2WaitToken) return;
@@ -2845,6 +2909,20 @@ async function playAct2() {
 $("act2Btn").onclick = playAct2;
 $("act2DirectBtn").onclick = playAct2;
 $("bookAct2Btn").onclick = playAct2;
+/* 第二幕已装齐、等一次点按再进：所有 prime 必须发生在新手势的同步段里，
+   下载完成/断网恢复这些非手势回调里绝不能直接进第二幕（会整段没声）。
+   2026-11-27 第六轮：playAct2 里等 phase2.promise 的分支、断网自愈、重试
+   三处原来都在非手势里直接进第二幕，改成只亮这个按钮。 */
+function showAct2Go() {
+  $("act2LoadTxt").textContent = "✅ 教室准备好了，点一下进入！";
+  const f = $("act2Fail"); if (f) f.classList.add("hidden");
+  const b = $("act2GoBtn");
+  if (b) b.classList.remove("hidden");
+}
+$("act2GoBtn").onclick = () => {
+  $("act2GoBtn").classList.add("hidden");
+  playAct2();
+};
 $("act2CancelBtn").onclick = () => { act2WaitToken++; $("act2LoadVeil").classList.add("hidden"); };
 $("act2AgainBtn").onclick = playAct2;
 $("backToAct1Btn").onclick = () => { exitAct2Chrome(); playAct1(); };
