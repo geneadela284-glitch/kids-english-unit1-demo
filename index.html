@@ -510,7 +510,7 @@
 
     <div class="veil hidden" id="act2LoadVeil" style="z-index:30;">
       <h1>🎬 第二幕马上开始</h1>
-      <p>教室还在布置中——等动画都到齐就开演，马上就好。</p>
+      <p>教室还在布置中——第一段动画到了就开演，其余边玩边装。</p>
       <div class="loadwrap">
         <div class="loadbar"><i id="act2Fill"></i></div>
         <div class="loadtxt" id="act2LoadTxt">正在准备第二幕…</div>
@@ -530,7 +530,7 @@
 "use strict";
 /* 构建版本（2026-11-27 第六轮）：每次发版改这个串；诊断角标每行都带它，
    任何一张截图都能证明跑的是哪个版本，旧缓存再也不会悄悄顶替新版。 */
-const BUILD_VERSION = "v11"; /* 第十一轮：每次发版改这个串，诊断行带版本，截图一眼可辨 */
+const BUILD_VERSION = "v12"; /* 第十二轮：每次发版改这个串，诊断行带版本，截图一眼可辨 */
 const $ = id => document.getElementById(id);
 const caption = $("caption"), capWho = $("capWho"), capLine = $("capLine");
 const turnEl = $("turn"), heardEl = $("heard"), micBtn = $("micBtn"), micNote = $("micNote");
@@ -1084,9 +1084,11 @@ function phaseRender(ph) {
     renderFailBox(ph, "loadFail", "loadFailList");
   } else {
     const fill = $("act2Fill"), txt = $("act2LoadTxt");
-    if (fill) fill.style.width = ph.pctShown + "%";
-    if (txt && !act2Primed) txt.textContent = navigator.onLine === false ? "📶 网络断啦——别关页面，网络回来会自动接着装…" : "正在准备第二幕… " + ph.done + "/" + ph.jobs.length + " 个 · " + mb(ph.bytesGot) + "MB";
-    renderFailBox(ph, "act2Fail", "act2FailList");
+    /* 第十二轮：首段入场门打开时，进度条和文案归入场门管——后台的第二阶段
+       总进度（n/73 个）会把「正在准备第一段… seg7 120KB/714KB」盖掉。 */
+    if (fill && !act2GateActive) fill.style.width = ph.pctShown + "%";
+    if (txt && !act2Primed && !act2GateActive) txt.textContent = navigator.onLine === false ? "📶 网络断啦——别关页面，网络回来会自动接着装…" : "正在准备第二幕… " + ph.done + "/" + ph.jobs.length + " 个 · " + mb(ph.bytesGot) + "MB";
+    if (!act2GateActive) renderFailBox(ph, "act2Fail", "act2FailList");
   }
 }
 /* 第二幕后台下载的让路条件：有视频正在播、或正在录音/上传（recBusy 从点下麦克风
@@ -1106,7 +1108,7 @@ async function runPhaseJobs(ph, concurrency) {
     while (queue.length) {
       if (ph.name === "act2") { while (phase2ShouldPause()) { ph.pausedMs = (ph.pausedMs || 0) + 300; await sleep(300); } }
       const j = queue.shift();
-      if (j.state === "ok") continue;
+      if (j.state === "ok" || j.state === "run") continue; /* 第十二轮：入场门/守门正在现拉的文件，后台不重复下 */
       j.state = "run";
       ph.bytesGot -= j.got; j.got = 0;
       try {
@@ -1162,6 +1164,7 @@ function fmtKB(b) { return (b >= 1048576) ? (b / 1048576).toFixed(1) + "MB" : Ma
 /* 单个任务的补下：与 runPhaseJobs 里 worker 的成功/失败处理一致——成功写 blobURLs＋
    挂视频 src；失败留 state=fail、视频退回直连。onChunk(gotBytes, totalBytes) 供调用方显示进度。 */
 async function fetchJobBlob(j, onChunk) {
+  j.state = "run"; /* 第十二轮：入场门/守门现拉时先占位，后台下载轮到它会跳过，不重复下同一个文件 */
   try {
     const u = await fetchAsBlobURL(j.url,
       got => { j.got = got; if (onChunk) onChunk(got, j.len || 0); },
@@ -1201,9 +1204,55 @@ async function createPhaseAudios(files) {
     await sleep(70);
   }
 }
+/* ---------- 第二幕入场门：只等首段（第十二轮） ----------
+   真机根因（代码证实＋02:15 截图）：进第二幕要等整个第二阶段（seg7–seg11 五段
+   视频＋68 条配音，约 6.5MB）全部 settle 才亮「点一下进入」；慢网＋单并发＋
+   播放/录音时让路节流下，这一步要几分钟到十几分钟。更糟的是入场后的
+   primeAudios（68 条）＋primeVids（5 段）还在「正在把教室准备好…」里串行跑——
+   截图里进度条已满、诊断 v11、只剩「先回第一幕」能点，就是卡在这一步。
+   修法：入场只等首段（seg7 视频＋第一句配音 smith-morning，约 766KB）齐全就亮
+   「先开演」；其余媒体后台继续装，进教室后每回合开始前由 v10 的守门现拉补下；
+   入场 prime 只做首段、2 秒封顶，绝不堵住入场。 */
+let act2FirstReady = false;
+let act2GateActive = false;
+const ACT2_FIRST_KEYS = ["clips/seg7", "audio/smith-morning"];
+function act2FirstJobs() { return phase2.jobs.filter(j => ACT2_FIRST_KEYS.indexOf(j.key) !== -1); }
+async function ensureAct2FirstBeat(onProgress) {
+  const jobs = act2FirstJobs().filter(j => !blobURLs[j.key]);
+  if (!jobs.length) return { ok: true, missing: [] };
+  const total = jobs.length;
+  let done = 0;
+  await Promise.all(jobs.map(async j => {
+    const name = j.url.split("/").pop();
+    if (onProgress) onProgress(done, total, name, 0, j.len || 0);
+    const ok = await fetchJobBlob(j, (got, len) => { if (onProgress) onProgress(done, total, name, got, len); });
+    if (ok) { done++; if (onProgress) onProgress(done, total, name, j.len || 0, j.len || 0); }
+  }));
+  phaseRender(phase2);
+  const missing = act2FirstJobs().filter(j => !blobURLs[j.key]);
+  return { ok: !missing.length, missing: missing.map(j => j.url.split("/").pop()) };
+}
+async function primeFirstBeat() {
+  /* 入场 prime 只做首段：seg7 视频＋smith-morning 配音。AC 元素可能还没建（blob
+     是刚补下的），先建出来再点火；调用方另有 2 秒封顶。 */
+  try { const a = getAudio("smith-morning"); try { a.load(); } catch (e) {} } catch (e) {}
+  await primeAudios(["smith-morning"]);
+  try { primeSfx(); } catch (e) {}
+  await primeVids(["seg7"]);
+}
+function showAct2Go(mode) {
+  /* mode "all"：整个第二阶段都齐了；"first"：只有首段齐了，其余边玩边装。 */
+  $("act2LoadTxt").textContent = mode === "all"
+    ? "✅ 教室准备好了，点一下进入！"
+    : "▶ 第一段准备好了，点一下先开演（其余动画边玩边装）";
+  const f = $("act2Fail"); if (f) f.classList.add("hidden");
+  const b = $("act2GoBtn");
+  if (b) b.classList.remove("hidden");
+}
 function markAct2Ready() {
   act2Ready = ACT2_SEGS.every(k => !!vids[k].src);
   window.__act2Ready = act2Ready;
+  if (act2Ready && ACT2_FIRST_KEYS.every(k => !!blobURLs[k])) act2FirstReady = true;
 }
 async function startLoading() {
   await runPhaseJobs(phase1, 4);
@@ -1249,12 +1298,22 @@ $("loadRetryBtn").onclick = async () => {
   }
 };
 $("act2RetryBtn").onclick = async () => {
-  await runPhaseJobs(phase2, 1);
+  /* 第十二轮：重试只补首段（seg7＋smith-morning），不等整个第二阶段；后台的
+     第二阶段下载本来就在跑，失败的其余文件由它继续装、进教室后按需补下。
+     （重试的点按手势早被前面的 await 耗掉了：只亮“点一下先开演”，不直接进第二幕） */
+  runPhaseJobs(phase2, 1); /* 不 await：失败的其余文件后台继续装 */
+  const show = (done, total, name, got, len) => {
+    $("act2LoadTxt").textContent = "正在准备第一段… " + done + "/" + total + "（" + name + " " + fmtKB(got) + (len ? "/" + fmtKB(len) : "") + "，其余动画进教室后边玩边装）";
+  };
+  const r = await ensureAct2FirstBeat(show);
   await createPhaseAudios(ACT2_AUDIO);
   markAct2Ready();
-  if (act2Ready && !$("act2LoadVeil").classList.contains("hidden")) {
-    /* 重试的点按手势早被前面的 await 耗掉了：只亮“点一下进入”，不直接进第二幕 */
-    showAct2Go();
+  if (r.ok) {
+    act2FirstReady = true;
+    if (!$("act2LoadVeil").classList.contains("hidden")) showAct2Go(phase2.settled && !phase2.failed().length ? "all" : "first");
+  } else {
+    $("act2LoadTxt").textContent = "⚠️ 第一段还没下好（" + r.missing.join("、") + "），再点一次「重新装这几个」。";
+    const fl = $("act2FailList"); if (fl) fl.textContent = r.missing.join("、");
   }
 };
 /* 断网自愈：加载途中网络断了，失败文件会列名＋可手动重试（已有）；网络一回来，
@@ -1289,9 +1348,10 @@ async function healFailed() {
       await createPhaseAudios(ACT2_AUDIO);
       markAct2Ready();
       phaseRender(phase2);
-      if (act2Ready && !$("act2LoadVeil").classList.contains("hidden")) {
+      if (!$("act2LoadVeil").classList.contains("hidden")) {
         /* 断网恢复是非手势回调：只亮“点一下进入”，绝不直接进第二幕 */
-        showAct2Go();
+        if (!phase2.failed().length) showAct2Go("all");
+        else if (ACT2_FIRST_KEYS.every(k => !!blobURLs[k])) { act2FirstReady = true; showAct2Go("first"); }
       }
     }
   } catch (e) {}
@@ -1533,9 +1593,19 @@ async function speakOver(segKey, who, text, audio, fromT, loopToT) {
   armWatchdog(v);
   let loopTimer = null;
   if (loopToT != null) {
+    /* 第十二轮：循环回跳的顿挫根源——旧版 120ms 轮询，播出 loopToT 后最多
+       120ms 才发现、再 seek 回来，来回约 250ms 的顿。改成 50ms 轮询、提前
+       80ms 回跳（loopToT-0.08），并加 250ms 内不重复 seek 的护栏。 */
+    let lastLoopSeek = 0;
     loopTimer = setInterval(() => {
-      if (v.currentTime >= loopToT || v.ended) { try { v.currentTime = fromT || 0; } catch (e) {} }
-    }, 120);
+      try {
+        if (v.ended) { v.currentTime = fromT || 0; return; }
+        if (v.currentTime >= loopToT - 0.08 && performance.now() - lastLoopSeek > 250) {
+          lastLoopSeek = performance.now();
+          v.currentTime = fromT || 0;
+        }
+      } catch (e) {}
+    }, 50);
   }
   await playVid(v);
   showCaption(who, text);
@@ -1565,6 +1635,7 @@ const TURNS = {
     ],
     funny: "whistle",
     cheerSeg: ["seg1", 0, 5.0],
+    nextSeg: ["seg2", "seg6"],
     check(t) {
       const m = t.match(/(?:my name is|name is|i am|i'm)\s+([a-z]+)/);
       if (m) return { ok: true, value: cap(m[1]) };
@@ -1591,6 +1662,7 @@ const TURNS = {
     ],
     funny: "zipper",
     cheerSeg: ["seg2", 3.3, 6.42],
+    nextSeg: "seg3",
     rescueSeg: ["seg2", 3.3, 6.42],
     check(t) { return TURNS.name.check(t); },
     onOk() { pop("啪！书包解开了 🎒"); }
@@ -1609,6 +1681,7 @@ const TURNS = {
     ],
     funny: "zipper",
     rescueSeg: ["seg3", 2.4, 5.0],
+    nextSeg: "seg4",
     check(t) {
       const nums = { seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12, thirteen: 13, fourteen: 14, fifteen: 15 };
       let v = null;
@@ -1633,6 +1706,7 @@ const TURNS = {
     ],
     funny: "zipper",
     rescueSeg: ["seg4", 3.1, 6.83],
+    nextSeg: "seg5",
     check(t) {
       const m = t.match(/from\s+([a-z ]+?)(?:\.|$)/);
       if (m) return { ok: true, value: cap(m[1].trim()) };
@@ -1678,6 +1752,7 @@ const TURNS = {
     ],
     funny: "whistle",
     cheerSeg: ["seg7", 3.4, 6.2], rescueSeg: ["seg7", 3.4, 6.2],
+    nextSeg: "seg8",
     check(t) {
       if (t.includes("here") && (t.includes("i'm") || t.includes("i am") || t.includes("im") || t.trim() === "here")) return { ok: true, value: "I'm here!" };
       return { ok: false };
@@ -1701,6 +1776,7 @@ const TURNS = {
     ],
     funny: "whistle",
     cheerSeg: ["seg8", 3.0, 6.0], rescueSeg: ["seg8", 3.0, 6.0],
+    nextSeg: "seg8",
     check(t) {
       if (t.includes("wang") && t.includes("peter")) return { ok: true, value: "Wang Peter" };
       return { ok: false };
@@ -1724,6 +1800,7 @@ const TURNS = {
     ],
     funny: "whistle",
     cheerSeg: ["seg8", 3.0, 6.0], rescueSeg: ["seg8", 3.0, 6.0],
+    nextSeg: "seg9",
     check(t) {
       if ((t.includes("that") && /\bme\b/.test(t)) || t.includes("that is me")) return { ok: true, value: "That's me!" };
       return { ok: false };
@@ -1747,6 +1824,7 @@ const TURNS = {
     ],
     funny: "whistle",
     cheerSeg: ["seg9", 0.3, 4.6], rescueSeg: ["seg9", 0.3, 4.6],
+    nextSeg: "seg10",
     check(t) {
       if (t.includes("twin")) return { ok: true, value: "twin" };
       return { ok: false };
@@ -1770,6 +1848,7 @@ const TURNS = {
     ],
     funny: "whistle",
     cheerSeg: ["seg10", 1.2, 5.0], rescueSeg: ["seg10", 1.2, 5.0],
+    nextSeg: "seg10",
     check(t) {
       if (t.includes("band")) return { ok: true, value: "band" };
       return { ok: false };
@@ -1793,6 +1872,7 @@ const TURNS = {
     ],
     funny: "whistle",
     cheerSeg: ["seg10", 1.2, 5.0], rescueSeg: ["seg10", 1.2, 5.0],
+    nextSeg: "seg8",
     check(t) {
       if (t.includes("guitar")) return { ok: true, value: "guitar" };
       return { ok: false };
@@ -1816,6 +1896,7 @@ const TURNS = {
     ],
     funny: "whistle",
     cheerSeg: ["seg8", 3.0, 6.0], rescueSeg: ["seg8", 3.0, 6.0],
+    nextSeg: "seg8",
     check(t) {
       if (t.includes("tennis")) return { ok: true, value: "tennis" };
       return { ok: false };
@@ -1839,6 +1920,7 @@ const TURNS = {
     ],
     funny: "whistle",
     cheerSeg: ["seg8", 3.0, 6.0], rescueSeg: ["seg8", 3.0, 6.0],
+    nextSeg: "seg11",
     check(t) {
       if (t.includes("hobby")) return { ok: true, value: "hobby" };
       return { ok: false };
@@ -1877,6 +1959,10 @@ function childTurn(key) {
        庆祝切段时不再现挂现解（seg2–seg6 在进第二幕后已被卸 src） */
     if (currentTurn.cheerSeg) warmSeg(currentTurn.cheerSeg[0], currentTurn.cheerSeg[1]);
     if (currentTurn.rescueSeg) warmSeg(currentTurn.rescueSeg[0], currentTurn.rescueSeg[1]);
+    /* 第十二轮：顺带预热下一段正片——孩子答题的几秒到几十秒里 CPU 是空闲的，
+       下一段的首帧在这里解出来，切段时就不再现挂现解（过场卡的根）。nextSeg
+       是剧本顺序的下一段（name 一次预热 seg2＋seg6，覆盖两个分支）。 */
+    if (currentTurn.nextSeg) (Array.isArray(currentTurn.nextSeg) ? currentTurn.nextSeg : [currentTurn.nextSeg]).forEach(k => warmSeg(k, 0));
     teardownMic();              /* 进回合前先确保麦克风链路是干净状态 */
     diagTurn(key);
     turnResolve = resolve;
@@ -2553,9 +2639,10 @@ function playWordBuffer(id) {
       setTimeout(() => fin(false, "no-ended"), Math.ceil(buf.duration * 1000) + 2000);
     };
     if (ctx.state === "suspended") {
-      /* 非手势自动播时上下文可能还没恢复：给 resume 800ms 机会，仍挂起就如实报，
-         游戏提示点喇叭重听（手势里 resume 一定能成）。 */
-      Promise.race([ctx.resume().catch(() => {}), sleep(800)]).then(go);
+      /* 非手势自动播时上下文可能还没恢复：resume 早已在孩子点卡的手势里由
+         unlockAudio 发起，这里等它完成——第十二轮：800→1500ms，iOS 上会话
+         恢复慢时不等死也不立刻判失败；仍挂起就如实报，游戏提示点喇叭重听。 */
+      Promise.race([ctx.resume().catch(() => {}), sleep(1500)]).then(go);
     } else go();
   });
 }
@@ -2593,10 +2680,22 @@ async function playWord(id) {
 async function playGameWord(id) {
   const g = gameState;
   if (!g || g.over || !g.target || g.target.id !== id) return false;
-  g.wordClaimed = true; /* 本轮已认领：300ms 自动播不再重复起播；失败时清掉，自动播/再点才能重试 */
+  g.wordClaimed = true; /* 本轮已认领：100ms 自动播不再重复起播；失败时清掉，自动播/再点才能重试 */
   if (!gameState || gameState.over || !gameState.target || gameState.target.id !== id) return false;
   const ok = await playWord(id);
-  if (ok) { g.wordHeard = true; return true; }
+  if (ok) {
+    g.wordHeard = true;
+    /* 第十二轮：计时公平——自动播的词若因加载/恢复上下文迟迟才响，迟到的那几秒
+       不该烧在 60 秒里：从回合开始到首响超过 1200ms 的部分，加回 deadline（每轮只补一次）。
+       孩子听完词再想、再点的时间照常烧——补的是加载的等待，不是玩的时间。 */
+    try {
+      if (g.roundStartedAt && g.compensatedSeq !== g.roundSeq && g.deadline) {
+        const lat = Date.now() - g.roundStartedAt;
+        if (lat > 1200) { g.deadline += (lat - 1200); g.compensatedSeq = g.roundSeq; }
+      }
+    } catch (e) {}
+    return true;
+  }
   g.wordClaimed = false;
   return false;
 }
@@ -2684,6 +2783,9 @@ function runGame() {
     /* 上一局结束幕可能还亮着：先切回游戏面板，再准备单词 */
     $("gameEnd").classList.add("hidden");
     $("gamePlay").classList.remove("hidden");
+    /* 第十二轮：抢答的 60 秒里舞台是空闲的，顺带把第二幕第一段 seg7 的首帧解出来——
+       进第二幕时它已经是热的，不用再现挂现解。blob 还没下到就静默跳过（入场门会补下）。 */
+    try { warmSeg("seg7", 0); } catch (e) {}
     startWordPrep();
   });
 }
@@ -2718,6 +2820,7 @@ function nextRound() {
   if (!g || g.over) return;
   g.locked = false; g.wrongs = 0;
   g.roundSeq++; g.wordHeard = false; g.wordClaimed = false; /* 新一轮：旧一轮挂起的自动播出全部作废 */
+  g.roundStartedAt = Date.now(); g.compensatedSeq = -1; /* 第十二轮：计时公平的起点 */
   const seq = g.roundSeq;
   const t = pickTarget();
   g.target = t;
@@ -2744,7 +2847,8 @@ function nextRound() {
     return;
   }
   /* 单词自动播：只播本轮目标词；本轮已答完/已换轮/已听过就不播（旧词不许漏进新一轮）。
-     若两次播放都被拒（iOS 手势窗口），把小喇叭按钮抖起来提示孩子点它重听 */
+     若两次播放都被拒（iOS 手势窗口），把小喇叭按钮抖起来提示孩子点它重听。
+     第十二轮：自动播延迟 300→100ms——词已解好在内存里，不用再等。 */
   setTimeout(() => {
     if (!gameState || gameState.over || gameState.roundSeq !== seq) return;
     const lb = $("gameListen");
@@ -2753,7 +2857,7 @@ function nextRound() {
     playGameWord(t.id).then(ok => {
       if (!ok && gameState && !gameState.over && gameState.roundSeq === seq) gameWordFailed(seq);
     }).catch(() => { if (gameState && !gameState.over && gameState.roundSeq === seq) gameWordFailed(seq); });
-  }, 300);
+  }, 100);
 }
 $("gameListen").onclick = () => {
   unlockAudio(); /* 手势里同步 resume 单词的 Web Audio 上下文（unlockAudio 内带） */
@@ -2803,8 +2907,8 @@ function gameTap(id, el) {
     } else {
       $("gameMsg").textContent = "⭐ 答对啦！就是 “" + t.en + "”！";
     }
-    g.roundSeq++; /* 本轮已答完：挂起的自动播出作废，不许旧词漏进下一轮；下一轮 300ms 自动播靠手势里已 resume 的 Web Audio 上下文 */
-    setTimeout(nextRound, 1000);
+    g.roundSeq++; /* 本轮已答完：挂起的自动播出作废，不许旧词漏进下一轮；下一轮 100ms 自动播靠手势里已 resume 的 Web Audio 上下文 */
+    setTimeout(nextRound, 500); /* 第十二轮：答对→下一轮 1000→500ms——反馈（⭐/音效）已亮够，久等只烧 60 秒 */
     return;
   }
   /* 点错：目标词没认出来 → 进封印本；本轮可再试一次 */
@@ -2819,8 +2923,8 @@ function gameTap(id, el) {
     $("gameMsg").textContent = "“" + t.en + "” 被收进封印本啦 📕 记住它，下次把它救出来！";
     const right = $("gameCards").querySelector("[data-id='" + t.id + "']");
     if (right) right.classList.add("answer");
-    g.roundSeq++; /* 本轮已结束：挂起的自动播出作废；下一轮 300ms 自动播靠手势里已 resume 的 Web Audio 上下文 */
-    setTimeout(nextRound, 1500);
+    g.roundSeq++; /* 本轮已结束：挂起的自动播出作废；下一轮 100ms 自动播靠手势里已 resume 的 Web Audio 上下文 */
+    setTimeout(nextRound, 800); /* 第十二轮：两错→下一轮 1500→800ms——封印提示已亮够，久等只烧 60 秒 */
   } else {
     $("gameMsg").textContent = "不是这个哦，再听一遍，救出 “" + t.en + "” 之前先认对它！";
   }
@@ -3138,26 +3242,40 @@ async function playAct2() {
   unlockAudio(); /* 同步段续音频会话：进第二幕的手势里先续上 */
   if (!act2Primed) {
     const myToken = ++act2WaitToken;
-    if (!act2Ready) {
-      /* 第二幕还没装齐：亮加载幕等齐，但绝不在这里接着 prime——await 之后已出在
-         手势之外，真机上点火全被拒，第二幕整段没声。等齐后只亮“点一下进入”
-         按钮，点它再进（那时已是新手势，prime 全在手势里）。 */
-      phaseRender(phase2);
+    if (!act2FirstReady) {
+      /* 第十二轮：入场只等首段（seg7＋smith-morning），不等整个第二阶段。
+         进度里写清在等哪个文件、下了多少；等的过程中其余媒体后台继续装。 */
+      act2GateActive = true;
       $("act2LoadVeil").classList.remove("hidden");
-      await phase2.promise;
-      markAct2Ready();
-      if (myToken !== act2WaitToken) return; /* 孩子中途回第一幕了 */
-      if (!act2Ready) { phaseRender(phase2); return; } /* 失败名单留在幕上，等重试/取消 */
-      showAct2Go();
+      const show = (done, total, name, got, len) => {
+        const fill = $("act2Fill");
+        if (fill) fill.style.width = Math.round(done / total * 100) + "%";
+        $("act2LoadTxt").textContent = "正在准备第一段… " + done + "/" + total + "（" + name + " " + fmtKB(got) + (len ? "/" + fmtKB(len) : "") + "，其余动画进教室后边玩边装）";
+      };
+      show(0, 2, "第一段动画＋配音", 0, 0);
+      const r = await ensureAct2FirstBeat(show);
+      if (myToken !== act2WaitToken) { act2GateActive = false; return; } /* 孩子中途回第一幕了 */
+      if (!r.ok) {
+        /* 首段没下好：明说缺哪个文件、给重试，别把用户留在只有「先回第一幕」的屏上 */
+        $("act2LoadTxt").textContent = "⚠️ 第一段还没下好（" + r.missing.join("、") + "），点下面「重新装这几个」再试一次。";
+        const fl = $("act2FailList"); if (fl) fl.textContent = r.missing.join("、");
+        const fb = $("act2Fail"); if (fb) fb.classList.remove("hidden");
+        phaseRender(phase2);
+        return;
+      }
+      act2FirstReady = true;
+      /* "all" 只有第二阶段真的全下完了（零失败）才配叫：act2Ready 只看视频 src，
+         直连兜底也算 src——那时其余媒体还在后台装，叫 "all" 是骗人。 */
+      showAct2Go(phase2.settled && !phase2.failed().length ? "all" : "first");
       return;
-    } else {
-      $("act2LoadTxt").textContent = "正在把教室准备好…";
-      $("act2LoadVeil").classList.remove("hidden");
     }
-    await primeAudios(ACT2_AUDIO);
-    primeSfx(); /* 第二幕入口重 prime 音效：第一幕录了多轮音后，会话可能已被打断过 */
-    await primeVids(ACT2_SEGS);
+    /* 首段已齐：入场 prime 只做首段、2 秒封顶——旧版 68 条配音＋5 段视频的串行
+       prime 是截图里「正在把教室准备好…」卡死的直接位置，绝不能再堵住入场。 */
+    $("act2LoadTxt").textContent = "正在把教室准备好…";
+    $("act2LoadVeil").classList.remove("hidden");
+    await Promise.race([primeFirstBeat(), sleep(2000)]);
     $("act2LoadVeil").classList.add("hidden");
+    act2GateActive = false;
     if (myToken !== act2WaitToken) return;
     act2Primed = true;
   }
@@ -3238,17 +3356,12 @@ $("bookAct2Btn").onclick = playAct2;
    下载完成/断网恢复这些非手势回调里绝不能直接进第二幕（会整段没声）。
    2026-11-27 第六轮：playAct2 里等 phase2.promise 的分支、断网自愈、重试
    三处原来都在非手势里直接进第二幕，改成只亮这个按钮。 */
-function showAct2Go() {
-  $("act2LoadTxt").textContent = "✅ 教室准备好了，点一下进入！";
-  const f = $("act2Fail"); if (f) f.classList.add("hidden");
-  const b = $("act2GoBtn");
-  if (b) b.classList.remove("hidden");
-}
+/* showAct2Go(mode) 已移到 markAct2Ready 前面（第十二轮：分 "all"/"first" 两种文案）。 */
 $("act2GoBtn").onclick = () => {
   $("act2GoBtn").classList.add("hidden");
   playAct2();
 };
-$("act2CancelBtn").onclick = () => { act2WaitToken++; $("act2LoadVeil").classList.add("hidden"); };
+$("act2CancelBtn").onclick = () => { act2WaitToken++; act2GateActive = false; $("act2LoadVeil").classList.add("hidden"); };
 $("act2AgainBtn").onclick = playAct2;
 $("backToAct1Btn").onclick = () => { exitAct2Chrome(); playAct1(); };
 $("act2GameBtn").onclick = async () => {
