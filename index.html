@@ -530,7 +530,7 @@
 "use strict";
 /* 构建版本（2026-11-27 第六轮）：每次发版改这个串；诊断角标每行都带它，
    任何一张截图都能证明跑的是哪个版本，旧缓存再也不会悄悄顶替新版。 */
-const BUILD_VERSION = "v10"; /* 第十轮：每次发版改这个串，诊断行带版本，截图一眼可辨 */
+const BUILD_VERSION = "v11"; /* 第十一轮：每次发版改这个串，诊断行带版本，截图一眼可辨 */
 const $ = id => document.getElementById(id);
 const caption = $("caption"), capWho = $("capWho"), capLine = $("capLine");
 const turnEl = $("turn"), heardEl = $("heard"), micBtn = $("micBtn"), micNote = $("micNote");
@@ -979,6 +979,7 @@ function playSfx(name) {
 let __unlockEl = null;
 function unlockAudio() {
   try {
+    resumeWordCtx(); /* 第十一轮：顺带把单词的 Web Audio 上下文续上（iOS 要求手势内 resume） */
     if (!__unlockEl) { __unlockEl = new Audio(sfxURL("ding")); __unlockEl.preload = "auto"; }
     const a = __unlockEl;
     a.muted = true;
@@ -2358,8 +2359,8 @@ function teardownMic() {
   micBtn.classList.remove("listening", "preparing");
 }
 /* 开识别前先静场：停掉一切还在响的声音输出（反应台词残留、示范音、音效），
-   别让播放通道占着音频会话。页面不用 WebAudio AudioContext（已核查），
-   声音输出只有这些 HTMLAudio 元素，逐个暂停即可。 */
+   别让播放通道占着音频会话。单词走单独的 Web Audio 上下文（第十一轮），
+   游戏里没有录音、录音前单词不可能在响，这里只处理 HTMLAudio 元素即可。 */
 function silenceOutputs() {
   for (const f in AC) { const a = AC[f]; try { if (!a.paused) a.pause(); } catch (e) {} }
   for (const n in SFX) { const a = SFX[n]; try { if (!a.paused) a.pause(); } catch (e) {} }
@@ -2456,67 +2457,163 @@ function sealWord(id) {
   if (!s.sealed) { s.sealed = true; s.ever = true; s.stars = 0; persist(); updateSealBadge(); }
 }
 let gameState = null;
-/* 听力游戏单词播出（2026-11-26 第三轮）：只播当轮目标词。播之前先等音频元素就绪
-   （元数据/可播），没就绪不播旧音频顶上；播出后记 g.wordHeard，本轮不再自动重播。 */
-function ensureWordReady(id) {
+/* ---------- 听力游戏单词播出：Web Audio（2026-11-28 第十一轮） ----------
+   真机根因（代码证实，截图诊断 word-parrot watchdog blob muted=0 paused=0
+   ct=0.00 rs=1、15 次全败）：单词一直走 <audio> 元素。word-* 元素建出来后从没人
+   调过 load()（createPhaseAudios 只覆盖第一幕配音）；primeGameWords 的静音
+   play→70ms→pause 会把还没数据的元素加载打断；喇叭连点时每次 tryPlay 都对
+   rs=1 的元素 currentTime=0＋play()，iOS 上 seek 未完成时 play() 承诺既不
+   resolve 也不 reject，元素永远卡在 HAVE_METADATA。对话能响正是因为它有
+   load()＋播出前的等待窗口——同一页、同一手机、同一会话，差异只在元素怎么
+   被建出来、怎么被播。blob 从没被 revoke（全页 revoke 只动录音回放与报告音频），
+   也不是元素数量上限（对话同期能响）。
+   根治：单词改走 Web Audio——blob 字节 decodeAudioData 解成 AudioBuffer，
+   起播就是新建 AudioBufferSourceNode 并 start()，彻底绕开 <audio> 的状态机
+   （readyState / play() 承诺 / 看门狗）。解码在抢答准备时一次做完；手势里
+   resume 上下文（iOS 要求）；失败写清新路径的失败点，不再只留一个 watchdog。
+   对话播出链（playAudio）不动——他手机上走得通。 */
+let wordCtx = null;           /* 单词播出的 AudioContext（与录音音量条的 meterCtx 分开，后者每轮录音新建、录完即关） */
+let wordBuffers = {};         /* id -> AudioBuffer（解好的单词音） */
+let wordBackend = "webaudio"; /* "webaudio" | "htmlaudio"（无 AudioContext 或 16 个全解码失败时退回旧路） */
+function ensureWordCtx() {
+  if (wordCtx) return wordCtx;
+  try {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) { wordBackend = "htmlaudio"; window.__wordBackend = wordBackend; return null; }
+    wordCtx = new Ctx();
+    window.__wordCtx = wordCtx;
+    window.__wordBackend = wordBackend;
+  } catch (e) { wordBackend = "htmlaudio"; window.__wordBackend = wordBackend; wordCtx = null; }
+  return wordCtx;
+}
+function resumeWordCtx() {
+  /* 手势里调：iOS 上 AudioContext 必须在手势里 resume 才能出声。unlockAudio
+     在每个关键手势里都被同步调用，这里是它顺带续上单词上下文的落点。 */
+  const ctx = ensureWordCtx();
+  if (ctx && ctx.state === "suspended") { try { ctx.resume().catch(() => {}); } catch (e) {} }
+}
+async function decodeWordBuffer(id) {
+  /* 把已下载的 blob 解成 AudioBuffer；成功返回 null，失败返回原因字符串。 */
+  const f = "word-" + id;
+  const u = blobURLs["audio/" + f];
+  if (!u) return "no-blob";
+  const ctx = ensureWordCtx();
+  if (!ctx) return "no-ctx";
+  try {
+    const blob = await (await fetch(u)).blob();
+    const ab = await blob.arrayBuffer();
+    const buf = await ctx.decodeAudioData(ab);
+    wordBuffers[id] = buf;
+    return null;
+  } catch (e) { return "decode-fail:" + ((e && e.name) || String(e)); }
+}
+async function ensureWordBuffers(onProgress) {
+  /* 抢答准备时把 16 个词一次解好；个别失败不拦开局（点按时按需重试），
+     全部失败则整局退回旧 <audio> 路。 */
+  const ctx = ensureWordCtx();
+  if (!ctx) return { ok: false, failed: WORD_FILES.map(f => f.slice(5)) };
+  let done = 0, failed = [];
+  for (const f of WORD_FILES) {
+    const id = f.slice(5);
+    if (wordBuffers[id]) { done++; if (onProgress) onProgress(done, WORD_FILES.length); continue; }
+    const err = await decodeWordBuffer(id);
+    done++;
+    if (err) failed.push(id);
+    if (onProgress) onProgress(done, WORD_FILES.length);
+  }
+  if (failed.length >= WORD_FILES.length) { wordBackend = "htmlaudio"; window.__wordBackend = wordBackend; return { ok: false, failed }; }
+  return { ok: true, failed };
+}
+function playWordBuffer(id) {
+  /* Web Audio 起播：同步建 source 并 start()，onended 结算。返回 Promise<{ok, reason, ms}>。 */
+  const startedAt = performance.now();
   return new Promise(resolve => {
-    const a = getAudio("word-" + id);
-    if (!a) return resolve(false);
-    if (a.readyState >= 2) return resolve(true);
-    let done = false;
-    const fin2 = v => { if (!done) { done = true; resolve(v); } };
-    a.addEventListener("canplay", () => fin2(true), { once: true });
-    a.addEventListener("error", () => fin2(false), { once: true });
-    /* 慢网给够时间（2026-11-27 第七轮）：直连现拉时元数据 1.5 秒到不了很常见，
-       旧版到点就判没就绪、播出直接走兜底；现在等 5 秒。点按路径已不用这条路
-       （第六轮改成同步起播），这里只服务 300ms 自动播。 */
-    setTimeout(() => fin2(a.readyState >= 2), 5000);
+    const buf = wordBuffers[id];
+    if (!buf) { resolve({ ok: false, reason: "no-buffer", ms: 0 }); return; }
+    const ctx = ensureWordCtx();
+    if (!ctx) { resolve({ ok: false, reason: "no-ctx", ms: 0 }); return; }
+    const go = () => {
+      if (ctx.state !== "running") { resolve({ ok: false, reason: "ctx-" + ctx.state, ms: Math.round(performance.now() - startedAt) }); return; }
+      let src;
+      try {
+        src = ctx.createBufferSource();
+        src.buffer = buf;
+        src.connect(ctx.destination);
+      } catch (e) { resolve({ ok: false, reason: "start-throw:" + ((e && e.name) || String(e)), ms: Math.round(performance.now() - startedAt) }); return; }
+      let done = false;
+      const fin = (ok, reason) => {
+        if (done) return; done = true;
+        try { src.disconnect(); } catch (e) {}
+        resolve({ ok, reason, ms: Math.round(performance.now() - startedAt) });
+      };
+      src.onended = () => fin(true, null);
+      try { src.start(0); } catch (e) { fin(false, "start-throw:" + ((e && e.name) || String(e))); return; }
+      /* 只防承诺永不 settle（上下文中途被挂起等极端情况），不作失败判定兜底：
+         到点仍按失败结算，不把“没响”当“响了”。 */
+      setTimeout(() => fin(false, "no-ended"), Math.ceil(buf.duration * 1000) + 2000);
+    };
+    if (ctx.state === "suspended") {
+      /* 非手势自动播时上下文可能还没恢复：给 resume 800ms 机会，仍挂起就如实报，
+         游戏提示点喇叭重听（手势里 resume 一定能成）。 */
+      Promise.race([ctx.resume().catch(() => {}), sleep(800)]).then(go);
+    } else go();
   });
 }
+async function playWord(id) {
+  /* 单词播出统一入口：Web Audio 为主，无 AudioContext 时退回旧 <audio> 路
+     （旧路自己的计数与诊断原样保留）。 */
+  const file = "word-" + id;
+  window.__wordBackend = wordBackend;
+  if (wordBackend !== "webaudio") return playAudio(file, { strict: true, playHangMs: 5000 });
+  if (!wordBuffers[id]) {
+    /* 准备时解码失败的词：播之前现解一次，解不好再如实报失败 */
+    const err = await decodeWordBuffer(id);
+    if (err || !wordBuffers[id]) {
+      window.__wordFailCount++;
+      micDiag.wordFail = file + " webaudio-" + (err || "no-buffer") + " webaudio";
+      renderDiag();
+      audioLog({ file, src: "webaudio", result: "webaudio-" + (err || "no-buffer"), ended: false, ctMoved: false, ms: 0 });
+      return false;
+    }
+  }
+  const r = await playWordBuffer(id);
+  if (r.ok) {
+    window.__wordOkCount++;
+    micDiag.wordFail = null; renderDiag();
+    audioLog({ file, src: "webaudio", result: "ok", ended: true, ctMoved: true, ms: r.ms });
+    return true;
+  }
+  window.__wordFailCount++;
+  micDiag.wordFail = file + " webaudio-" + (r.reason || "fail") + " webaudio";
+  renderDiag();
+  audioLog({ file, src: "webaudio", result: "webaudio-" + (r.reason || "fail"), ended: false, ctMoved: false, ms: r.ms });
+  return false;
+}
+/* 听力游戏单词播出：只播当轮目标词。播出后记 g.wordHeard，本轮不再自动重播。 */
 async function playGameWord(id) {
   const g = gameState;
   if (!g || g.over || !g.target || g.target.id !== id) return false;
   g.wordClaimed = true; /* 本轮已认领：300ms 自动播不再重复起播；失败时清掉，自动播/再点才能重试 */
-  await ensureWordReady(id);
   if (!gameState || gameState.over || !gameState.target || gameState.target.id !== id) return false;
-  const ok = await playAudio("word-" + id, { strict: true, playHangMs: 5000 });
+  const ok = await playWord(id);
   if (ok) { g.wordHeard = true; return true; }
   g.wordClaimed = false;
   return false;
 }
-/* ---------- 听力游戏单词通道（2026-11-27 第五轮·根治） ----------
-   真机根因：word-* 元素只在开局 primeMedia 时点火过一次；进第二幕只重 prime
-   了 ACT2_AUDIO，word-* 没重 prime；其间每一轮录音都会打断 iOS 音频会话，
-   旧点火全部作废——最后一局抢答时单词元素是“冷”的，非手势自动播直接被拒；
-   点小喇叭那下又要先 await ensureWordReady，真正 play() 时已出在手势窗口之外，
-   一样被拒；重试与 blob→直连兜底也都在手势之外，全军覆没，游戏却照常走。
-   根治：单词播出走一条不依赖“上次点火还热着”的路——
-   (1) 每局开局＋每次点按手势里，同步把 16 个 word-* 元素静音点火一次
-       （静音播出手势豁免，随时能点火；游戏里没有录音再打断，一局内点火一直有效）；
-   (2) 喇叭点按时同步起播，不先 await（第六轮修正：就绪与否都同步起播，冷元素
-       也不等 ensureWordReady——旧版冷元素先等 1.5s 再播，已出手势窗口，真机必拒）；
-   (3) 单词播出用 strict 模式：没响就是失败，不许以“放行”当成功；
-   (4) 播失败时页面看得见（喇叭抖动＋文字提示），点得了（再点重播）。 */
-const WORD_FILES = WORDS.map(w => "word-" + w.id);
-function primeGameWords() {
-  for (const f of WORD_FILES) {
-    const a = getAudio(f);
-    if (!a) continue;
-    try {
-      /* 正在真播的元素别碰：静音点火会先把它静音、70ms 后暂停掐断——
-         快点按卡片时自动播出的单词正在响，续火不能掐它 */
-      if (!a.paused && !a.muted) continue;
-      const gen = (a.__primeGen = (a.__primeGen || 0) + 1);
-      a.muted = true;
-      const p = a.play();
-      if (p && p.catch) p.catch(() => {});
-      setTimeout(() => {
-        if (a.__primeGen !== gen) return; /* 其间已起播真声：别碰它 */
-        try { a.pause(); a.currentTime = 0; a.muted = false; } catch (e) {}
-      }, 70);
-    } catch (e) {}
-  }
+async function playGameWordNow(id) {
+  const g = gameState;
+  if (!g || g.over || !g.target || g.target.id !== id) return false;
+  /* 喇叭点按：Web Audio 起播是同步建 source 并 start()，手势里 unlockAudio
+     已 resume 上下文，不用再等元素就绪、不用 await 任何就绪检查。 */
+  g.wordClaimed = true;
+  const ok = await playWord(id);
+  if (ok) { g.wordHeard = true; return true; }
+  g.wordClaimed = false;
+  return false;
 }
+/* 抢答单词的文件名表（"word-" 前缀已带，缓存键就是 f 本身）。第十一轮起单词
+   改走 Web Audio，<audio> 元素的静音点火（primeGameWords）已整体删除。 */
+const WORD_FILES = WORDS.map(w => "word-" + w.id);
 function gameWordFailed(seq) {
   const g = gameState;
   if (!g || g.over || g.locked) return;
@@ -2524,20 +2621,6 @@ function gameWordFailed(seq) {
   const b = $("gameListen");
   if (b) b.classList.add("listen-pulse");
   $("gameMsg").textContent = "没听到？点一下 🔊 再听一遍！";
-}
-async function playGameWordNow(id) {
-  const g = gameState;
-  if (!g || g.over || !g.target || g.target.id !== id) return false;
-  /* 喇叭点按必须同步起播——不管元素就绪与否（2026-11-27 第六轮修正）：
-     旧版元素没就绪时先 await ensureWordReady（最长 1.5s），真正 play() 时已出在
-     手势窗口之外，真机上必被拒；桌面上元素永远是就绪的，这条路从来没跑过，
-     所以桌面验不到。元素没就绪时直接 play() 也能在手势里占住播出权，数据到了
-     就响；2 秒没 settle 看门狗会按失败算，提示里点一下能重播。 */
-  g.wordClaimed = true;
-  const ok = await playAudio("word-" + id, { strict: true, playHangMs: 5000 });
-  if (ok) { g.wordHeard = true; return true; }
-  g.wordClaimed = false;
-  return false;
 }
 /* ---------- 抢答前先把 16 个单词的本地音频备齐（2026-11-27 第七轮） ----------
    真机根因（代码证实）：word-* 在第一阶段末尾下载，慢网下最容易 15 秒判死；
@@ -2579,10 +2662,14 @@ async function startWordPrep() {
   g.prepping = false;
   if (r.ok) {
     g.wordsReady = true;
-    /* 补下前点按已把单词元素建成了直连源（handler 开头的 primeGameWords 先跑）：
-       删掉缓存，下次取元素时按新 blob 重建——否则补下的 blob 白下、播出仍走直连慢路。
-       注意 WORD_FILES 本身已带 "word-" 前缀，缓存键就是 f，别再拼一遍。 */
-    WORD_FILES.forEach(f => { try { delete AC[f]; } catch (e) {} });
+    /* 第十一轮：单词改走 Web Audio——blob 下好后先把 16 个词解成 AudioBuffer，
+       起播就不用再经过 <audio> 元素。个别解码失败不拦开局（点按时按需重试）；
+       全部失败则整局退回旧 <audio> 路（ensureWordBuffers 里定）。 */
+    $("gameMsg").textContent = "正在解码单词…";
+    await ensureWordBuffers((done, total) => {
+      if (gameState === g && !g.over) $("gameMsg").textContent = "正在解码单词… " + done + "/" + total;
+    });
+    if (gameState !== g || g.over) return;
     startGameRound0();
   } else {
     g.wordsReady = false;
@@ -2603,7 +2690,7 @@ function runGame() {
 function startGameRound0() {
   const g = gameState;
   micDiag.wordFail = null; /* 新一局：上一局的单词失败明细清掉，别留在诊断行里 */
-  primeGameWords(); /* 开局就把 16 个单词音重新点火：上一幕的录音/视频打断后旧点火已作废 */
+  resumeWordCtx(); /* 第十一轮：单词走 Web Audio，开局不用再点火元素，顺带把上下文续上 */
   g.stars = 0; g.combo = 0; g.correct = 0; g.sealedNew = 0; g.unsealedNew = 0; g.over = false;
   g.firstRound = true; /* 2026-11-26 第二轮：每局首轮单词不自动播，等孩子点小喇叭的手势触发——
     300ms 后自动播不在手势里，iOS 上会被拒；后续轮次自动播保留（带补播＋抖喇叭兜底） */
@@ -2669,8 +2756,7 @@ function nextRound() {
   }, 300);
 }
 $("gameListen").onclick = () => {
-  unlockAudio();
-  primeGameWords(); /* 手势里同步续火：单词元素重新在手势里播过 */
+  unlockAudio(); /* 手势里同步 resume 单词的 Web Audio 上下文（unlockAudio 内带） */
   const b = $("gameListen");
   /* 点按立刻有可见反馈（2026-11-27 第七轮）：不管播出成败，喇叭先抖一下、文案先变
      ——旧版点按后要等播出结算（慢网最长十几秒）才有任何反应，看起来像按钮死了 */
@@ -2717,8 +2803,7 @@ function gameTap(id, el) {
     } else {
       $("gameMsg").textContent = "⭐ 答对啦！就是 “" + t.en + "”！";
     }
-    g.roundSeq++; /* 本轮已答完：挂起的自动播出作废，不许旧词漏进下一轮 */
-    primeGameWords(); /* 下一轮 300ms 自动播靠这次点火：手势里同步把单词元素续热 */
+    g.roundSeq++; /* 本轮已答完：挂起的自动播出作废，不许旧词漏进下一轮；下一轮 300ms 自动播靠手势里已 resume 的 Web Audio 上下文 */
     setTimeout(nextRound, 1000);
     return;
   }
@@ -2734,8 +2819,7 @@ function gameTap(id, el) {
     $("gameMsg").textContent = "“" + t.en + "” 被收进封印本啦 📕 记住它，下次把它救出来！";
     const right = $("gameCards").querySelector("[data-id='" + t.id + "']");
     if (right) right.classList.add("answer");
-    g.roundSeq++; /* 本轮已结束：挂起的自动播出作废 */
-    primeGameWords(); /* 下一轮 300ms 自动播靠这次点火：手势里同步把单词元素续热 */
+    g.roundSeq++; /* 本轮已结束：挂起的自动播出作废；下一轮 300ms 自动播靠手势里已 resume 的 Web Audio 上下文 */
     setTimeout(nextRound, 1500);
   } else {
     $("gameMsg").textContent = "不是这个哦，再听一遍，救出 “" + t.en + "” 之前先认对它！";
