@@ -531,7 +531,7 @@
 /* 构建版本（2026-11-27 第六轮）：每次发版改这个串；诊断角标每行都带它，
    任何一张截图都能证明跑的是哪个版本，旧缓存再也不会悄悄顶替新版。 */
 /* v13（2026-11-28）：回滚 v12，恢复 v11 的声音；除版本号外内容与 v11 字节一致。 */
-const BUILD_VERSION = "v13"; /* 第十三轮：每次发版改这个串，诊断行带版本，截图一眼可辨 */
+const BUILD_VERSION = "v14"; /* 第十四轮：每次发版改这个串，诊断行带版本，截图一眼可辨 */
 const $ = id => document.getElementById(id);
 const caption = $("caption"), capWho = $("capWho"), capLine = $("capLine");
 const turnEl = $("turn"), heardEl = $("heard"), micBtn = $("micBtn"), micNote = $("micNote");
@@ -611,7 +611,13 @@ async function showSeg(key, t) {
   if (!v) return null;
   const target = (t == null ? 0 : t);
   if (activeVid === v) {
-    /* 已在台上：只把时间拨到目标点，等 seeked 再走，免得播到一半跳帧 */
+    /* 已在台上：先确认有帧（v11 式缺 load()：首屏 seg1 可能一直没数据，黑屏露底）。
+       没数据就 load 并等首帧（有界 2000ms），再把时间拨到目标点等 seeked。 */
+    if (v.readyState < 2) { try { v.load(); } catch (e) {} await waitEvent(v, "loadeddata", 2000); }
+    if (v.readyState < 2) {
+      try { micDiag.mediaFail = "seg-" + key + " no-frame"; renderDiag(); } catch (e) {}
+      return v;
+    }
     try { if (Math.abs(v.currentTime - target) > 0.15) { v.currentTime = target; await waitEvent(v, "seeked", 1200); } } catch (e) {}
     return v;
   }
@@ -800,9 +806,128 @@ $("audioRetry").onclick = async () => {
   try { await Promise.race([ensureAudioReady(f), sleep(8000)]); } catch (e) {}
   playAudio(f).then(ok => { if (ok) hideAudioRetry(); });
 };
-function playAudio(file, opts) {
+/* ---------- 对话/音效播出：Web Audio（2026-11-28 第十四轮） ----------
+   真机根因（诊断页证实，勿推翻）：手机、文件、网络、三条播放路径全部正常；
+   课程页失败是因为它在没有用户手势的时候调 play()（下载/定时器之后），iOS
+   不放行，play() 悬住（play-hang）、视频无帧。诊断页（同机同文件同网）由用户
+   点按触发则三路全通：Web Audio fetch 5ms、decode 4.85s、currentTime 走动、
+   onended 播完；普通 audio play() resolved；视频有画面、play() resolved。
+   修法：对话与音效改走 Web Audio（与第十一轮抢答单词同款机制）：blob 字节
+   decodeAudioData 解成 AudioBuffer，起播新建 BufferSource；共享 AudioContext
+   （wordCtx）在手势里 resume（unlockAllMedia / unlockAudio）；解码失败或无
+   AudioContext 时回退旧 <audio> 路（playAudioHtml / playSfxHtml）。 */
+let dlgBuffers = {};          /* "audio/x" / "sfx/x" -> AudioBuffer（解好的对话/音效） */
+let dlgDecodeFail = {};       /* key -> reason（解不好的文件不再重复尝试，直接回退） */
+let dlgBackend = "webaudio";  /* "webaudio" | "htmlaudio"（无 AudioContext 时退回旧路） */
+window.__dlgBackend = dlgBackend;
+function dlgDirectURL(key) {
+  if (key.indexOf("audio/") === 0) return A(key.slice(6));
+  if (key.indexOf("sfx/") === 0) return key + ".mp3";
+  return null;
+}
+async function decodeDlgBuffer(key) {
+  /* 把已下载的 blob 解成 AudioBuffer；成功返回 null，失败返回原因字符串。 */
+  const u = blobURLs[key];
+  const ctx = ensureWordCtx();
+  if (!ctx) { dlgBackend = "htmlaudio"; window.__dlgBackend = dlgBackend; return "no-ctx"; }
+  try {
+    let ab = null;
+    if (u) {
+      const blob = await (await fetch(u)).blob();
+      ab = await blob.arrayBuffer();
+    } else {
+      const du = dlgDirectURL(key);
+      if (!du) return "no-blob";
+      const r = await fetch(du);
+      if (!r.ok) return "http-" + r.status;
+      ab = await r.arrayBuffer();
+    }
+    const buf = await ctx.decodeAudioData(ab);
+    dlgBuffers[key] = buf;
+    return null;
+  } catch (e) { return "decode-fail:" + ((e && e.name) || String(e)); }
+}
+async function primeDlgBuffers(keys) {
+  /* 后台预解码：个别失败不拦（播出时按需重试，解不好回退旧路）。 */
+  for (let i = 0; i < keys.length; i++) {
+    const k = keys[i];
+    if (!dlgBuffers[k] && !dlgDecodeFail[k]) {
+      try {
+        const err = await decodeDlgBuffer(k);
+        if (err) dlgDecodeFail[k] = err;
+      } catch (e) {}
+    }
+    if (i % 4 === 3) await sleep(0);
+  }
+}
+function playDlgBuffer(key) {
+  /* Web Audio 起播：同步建 source 并 start()，onended 结算。返回 Promise<{ok, reason, ms}>。 */
+  const startedAt = performance.now();
   return new Promise(resolve => {
-    ttStampNext(); /* 判定完成后首次起播：就是下一句的起点 */
+    const buf = dlgBuffers[key];
+    if (!buf) { resolve({ ok: false, reason: "no-buffer", ms: 0 }); return; }
+    const ctx = ensureWordCtx();
+    if (!ctx) { resolve({ ok: false, reason: "no-ctx", ms: 0 }); return; }
+    const go = () => {
+      if (ctx.state !== "running") { resolve({ ok: false, reason: "ctx-" + ctx.state, ms: Math.round(performance.now() - startedAt) }); return; }
+      let src;
+      try {
+        src = ctx.createBufferSource();
+        src.buffer = buf;
+        src.connect(ctx.destination);
+      } catch (e) { resolve({ ok: false, reason: "start-throw:" + ((e && e.name) || String(e)), ms: Math.round(performance.now() - startedAt) }); return; }
+      let done = false;
+      const fin = (ok, reason) => {
+        if (done) return; done = true;
+        try { src.disconnect(); } catch (e) {}
+        resolve({ ok, reason, ms: Math.round(performance.now() - startedAt) });
+      };
+      src.onended = () => fin(true, null);
+      try { src.start(0); } catch (e) { fin(false, "start-throw:" + ((e && e.name) || String(e))); return; }
+      setTimeout(() => fin(false, "no-ended"), Math.ceil(buf.duration * 1000) + 2000);
+    };
+    if (ctx.state === "suspended") {
+      /* 非手势自动播时上下文可能还没恢复：给 resume 800ms 机会（与单词同款），
+         仍挂起就如实报失败，回退旧路。 */
+      Promise.race([ctx.resume().catch(() => {}), sleep(800)]).then(go);
+    } else go();
+  });
+}
+async function playAudioWA(file) {
+  /* Web Audio 尝试：解好就播；返回 {ok, reason, ms}，调用方按旧口径结算。 */
+  const key = "audio/" + file;
+  if (!dlgBuffers[key]) {
+    if (dlgDecodeFail[key]) return { ok: false, reason: dlgDecodeFail[key], ms: 0 };
+    const err = await decodeDlgBuffer(key);
+    if (err || !dlgBuffers[key]) { if (err) dlgDecodeFail[key] = err; return { ok: false, reason: err || "no-buffer", ms: 0 }; }
+  }
+  return playDlgBuffer(key);
+}
+function playAudio(file, opts) {
+  /* v14：Web Audio 为主（与抢答单词同款），没响再回退旧 <audio> 路。
+     返回口径与旧版一致：对话几乎总为 true（剧情不等死），单词 strict 只有真响才 true；
+     本函数永不 reject（回退路自己结算），调用方 await 不会抛错。 */
+  ttStampNext(); /* 判定完成后首次起播：就是下一句的起点 */
+  if (dlgBackend !== "webaudio") return playAudioHtml(file, opts);
+  return playAudioWA(file).then(r => {
+    if (r.ok) {
+      /* 成功结算：与旧 fin() 的成功分支同口径（计数、诊断、收横幅） */
+      audioLog({ file, src: "webaudio", result: "ok", ended: true, ctMoved: true, ms: r.ms });
+      if (file.indexOf("word-") === 0) {
+        window.__wordOkCount++;
+        micDiag.wordFail = null; renderDiag();
+      } else {
+        hideAudioRetry();
+      }
+      return true;
+    }
+    /* Web Audio 没响：记一行再回退旧 <audio> 路（旧路自己记账、自己结算） */
+    audioLog({ file, src: "webaudio", result: "webaudio-" + (r.reason || "fail"), ended: false, ctMoved: false, ms: r.ms });
+    return playAudioHtml(file, opts);
+  }).catch(() => playAudioHtml(file, opts));
+}
+function playAudioHtml(file, opts) {
+  return new Promise(resolve => {
     /* strict（单词播出专用，2026-11-27 第五轮）：没响就是失败——stalled/play-hang/
        watchdog 到点未播完一律按失败结算，不许以“放行”当成功；对话配音保持旧行为（剧情不等死）。 */
     const strict = !!(opts && opts.strict);
@@ -929,7 +1054,31 @@ function ensureSfx() {
     if (!SFX[n]) { try { const a = new Audio(sfxURL(n)); a.preload = "auto"; SFX[n] = a; } catch (e) {} }
   });
 }
+async function playSfxWA(name) {
+  const key = "sfx/" + name;
+  if (!dlgBuffers[key]) {
+    if (dlgDecodeFail[key]) return { ok: false, reason: dlgDecodeFail[key] };
+    const err = await decodeDlgBuffer(key);
+    if (err || !dlgBuffers[key]) { if (err) dlgDecodeFail[key] = err; return { ok: false, reason: err || "no-buffer" }; }
+  }
+  return playDlgBuffer(key);
+}
 function playSfx(name) {
+  /* v14：Web Audio 为主，没响再回退旧 <audio> 路（即时触发，不阻塞剧情）。 */
+  try {
+    if (dlgBackend !== "webaudio") return playSfxHtml(name);
+    const startedAt = performance.now();
+    playSfxWA(name).then(r => {
+      if (r.ok) {
+        audioLog({ file: "sfx/" + name, src: "webaudio", result: "ok", ended: true, ctMoved: true, ms: Math.round(performance.now() - startedAt) });
+      } else {
+        audioLog({ file: "sfx/" + name, src: "webaudio", result: "webaudio-" + (r.reason || "fail"), ended: false, ctMoved: false, ms: Math.round(performance.now() - startedAt) });
+        playSfxHtml(name);
+      }
+    }).catch(() => { try { playSfxHtml(name); } catch (e) {} });
+  } catch (e) {}
+}
+function playSfxHtml(name) {
   try {
     ensureSfx();
     let a = SFX[name];
@@ -987,6 +1136,66 @@ function unlockAudio() {
     const p = a.play();
     if (p && p.catch) p.catch(() => {});
     setTimeout(() => { try { a.pause(); a.currentTime = 0; a.muted = false; } catch (e) {} }, 70);
+  } catch (e) {}
+}
+/* 手势内全量解锁（2026-11-28 第十四轮）：真机根因（诊断页证实）——课程页
+   在没有用户手势的时候调 play()（下载/定时器之后），iOS 不放行，play() 悬住、
+   视频无帧；诊断页点按处理里同步 load()＋play() 则三路全通。
+   修法：每个开始手势的同步段里（任何 await 之前），把本幕要用的全部媒体元素
+   依次 load()＋play()＋pause()，并同步 resume 共享 AudioContext。play() 必须
+   在手势同步段里调用；pause 只是收尾，不影响解锁本身——音频 70ms 后暂停归零
+   （与旧 prime 同手法），视频等 playing 事件起来再暂停归零（2 秒没起来也收尾，
+   免得 70ms 暂停掐断还没数据的加载）。没数据的元素跳过（ensureSegReady /
+   ensureAudioReady 会在播前现拉，播出本身已改走 Web Audio）。 */
+function unlockAllMedia(segKeys, audioFiles) {
+  try { unlockAudio(); } catch (e) {} /* 单元素点火＋共享 AudioContext resume（手势内） */
+  /* 视频：本幕各段依次 load＋静音播（元素创建时已 muted=true） */
+  (segKeys || []).forEach(k => {
+    const v = vids[k];
+    if (!v) return;
+    try {
+      if (!v.src) { const bu = blobURLs["clips/" + k]; if (bu) v.src = bu; }
+      if (!v.src) return;
+      if (v.readyState < 2) { try { v.load(); } catch (e) {} }
+      let settled = false;
+      const stop = () => { if (settled) return; settled = true; try { v.pause(); v.currentTime = 0; } catch (e) {} };
+      v.addEventListener("playing", stop, { once: true });
+      setTimeout(stop, 2000);
+      const p = v.play();
+      if (p && p.catch) p.catch(() => {});
+    } catch (e) {}
+  });
+  /* 音频元素（回退路）：已有元素同步静音点火；70ms 后暂停归零、取消静音 */
+  (audioFiles || []).forEach(f => {
+    try {
+      const a = getAudio(f); /* 不存在就按当前源建一个（blob 优先） */
+      if (a.readyState < 2) { try { a.load(); } catch (e) {} }
+      a.muted = true;
+      const p = a.play();
+      if (p && p.catch) p.catch(() => {});
+    } catch (e) {}
+  });
+  setTimeout(() => {
+    (audioFiles || []).forEach(f => {
+      try { const a = AC[f]; if (a) { a.pause(); a.currentTime = 0; a.muted = false; } } catch (e) {}
+    });
+  }, 70);
+  /* 音效元素同上 */
+  try {
+    ensureSfx();
+    SFX_FILES.forEach(n => {
+      const a = SFX[n];
+      if (!a) return;
+      try {
+        if (a.readyState < 2) { try { a.load(); } catch (e) {} }
+        a.muted = true;
+        const p = a.play();
+        if (p && p.catch) p.catch(() => {});
+      } catch (e) {}
+    });
+    setTimeout(() => {
+      SFX_FILES.forEach(n => { try { const a = SFX[n]; if (a) { a.pause(); a.currentTime = 0; a.muted = false; } } catch (e) {} });
+    }, 70);
   } catch (e) {}
 }
 
@@ -1210,6 +1419,9 @@ async function startLoading() {
   await runPhaseJobs(phase1, 4);
   await createPhaseAudios(ACT1_AUDIO);
   ensureSfx();
+  /* v14：后台预解码对话/音效（Web Audio 用；解不好不拦，播出时按需重试/回退） */
+  primeDlgBuffers(ACT1_AUDIO.map(f => "audio/" + f));
+  primeDlgBuffers(SFX_FILES.map(n => "sfx/" + n));
   /* 第十轮：开课门——第一回合媒体（seg1＋mimi-hello）没齐全，开始按钮保持禁用，
      缺什么明说；其它文件缺失仍可按旧口径先开始（"大部分装好啦"）。 */
   const gate = await ensureFirstRoundMedia();
@@ -1230,6 +1442,7 @@ async function startLoading() {
      单并发＋让路节流（播视频/录音上传时暂停，空闲再续）：弱网下不抢带宽 */
   runPhaseJobs(phase2, 1).then(async () => {
     await createPhaseAudios(ACT2_AUDIO);
+    primeDlgBuffers(ACT2_AUDIO.map(f => "audio/" + f)); /* v14：后台预解码第二幕配音 */
     markAct2Ready();
   });
 }
@@ -1423,6 +1636,8 @@ function playVid(v) {
   return Promise.resolve();
 }
 function audioDurMs(f) {
+  const b = dlgBuffers["audio/" + f];
+  if (b && isFinite(b.duration) && b.duration > 0) return b.duration * 1000;
   const a = AC[f];
   return (a && isFinite(a.duration) && a.duration > 0) ? a.duration * 1000 : 2500;
 }
@@ -3098,7 +3313,7 @@ async function playAct1() {
   $("endVeil").classList.remove("hidden");
 }
 $("startBtn").onclick = async () => {
-  unlockAudio();
+  unlockAllMedia(ACT1_SEGS, ACT1_AUDIO); /* v14：手势同步段全量解锁（任何 await 之前） */
   if (!assetsReady) return;
   const btn = $("startBtn");
   btn.disabled = true;
@@ -3108,8 +3323,9 @@ $("startBtn").onclick = async () => {
   btn.textContent = "开始上课";
   playAct1();
 };
-$("againBtn").onclick = playAct1;
+$("againBtn").onclick = () => { unlockAllMedia(ACT1_SEGS, ACT1_AUDIO); playAct1(); };
 $("gameReplayBtn").onclick = async () => {
+  unlockAllMedia(ACT1_SEGS, ACT1_AUDIO); /* v14：手势同步段全量解锁 */
   $("endVeil").classList.add("hidden");
   await runGame();
   $("endVeil").classList.remove("hidden");
@@ -3136,7 +3352,7 @@ function exitAct2Chrome() { setSlots(ACT1_SLOTS, ACT1_TTL); }
 let act2WaitToken = 0;
 let act2Primed = false;
 async function playAct2() {
-  unlockAudio(); /* 同步段续音频会话：进第二幕的手势里先续上 */
+  unlockAllMedia(ACT2_SEGS, ACT2_AUDIO); /* v14：手势同步段全量解锁（任何 await 之前） */
   if (!act2Primed) {
     const myToken = ++act2WaitToken;
     if (!act2Ready) {
@@ -3251,9 +3467,9 @@ $("act2GoBtn").onclick = () => {
 };
 $("act2CancelBtn").onclick = () => { act2WaitToken++; $("act2LoadVeil").classList.add("hidden"); };
 $("act2AgainBtn").onclick = playAct2;
-$("backToAct1Btn").onclick = () => { exitAct2Chrome(); playAct1(); };
+$("backToAct1Btn").onclick = () => { unlockAllMedia(ACT1_SEGS, ACT1_AUDIO); exitAct2Chrome(); playAct1(); };
 $("act2GameBtn").onclick = async () => {
-  unlockAudio();
+  unlockAllMedia(ACT1_SEGS, ACT1_AUDIO); /* v14：手势同步段全量解锁 */
   $("endVeil2").classList.add("hidden");
   await runGame();
   $("endVeil2").classList.remove("hidden");
