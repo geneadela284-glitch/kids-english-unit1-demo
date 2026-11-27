@@ -162,6 +162,8 @@
   /* 对话播出失败提示（2026-11-27 第六轮）：置顶横幅，盖过所有幕布，点一下就在手势里重解锁、重播那句 */
   .audioretry { position:fixed; top:10px; left:12px; right:12px; z-index:50; padding:13px 10px; font-size:16px; font-weight:900; color:#fff; background:#c0392b; border:none; border-radius:12px; box-shadow:0 4px 16px rgba(0,0,0,.45); }
   .audioretry:active { transform:translateY(2px); }
+  /* 第十轮：回合开始前的媒体加载提示——盖在视频上（z-5）、在回合面板（z-7）之下 */
+  .stageloading { position:absolute; left:50%; top:38%; transform:translateX(-50%); z-index:5; background:rgba(20,30,25,.85); color:#ffe9a8; font-size:14px; font-weight:800; padding:10px 16px; border-radius:999px; box-shadow:0 4px 18px rgba(0,0,0,.35); white-space:nowrap; max-width:92%; overflow:hidden; text-overflow:ellipsis; }
   .volbar { height:14px; width:220px; max-width:82%; margin:8px auto 0; background:#e3e9e4; border:2px solid #bfe3d2; border-radius:99px; overflow:hidden; opacity:0; transition:opacity .2s; }
   /* 2026-11-26：录音时唯一的实时反馈就是这条音量条——iOS 上做不了实时字幕，所以加粗加宽，让孩子看得见自己在出声。 */
   .volbar.show { opacity:1; }
@@ -364,6 +366,7 @@
 
   <div class="stage" id="stage">
     <div id="pool"></div>
+    <div class="stageloading hidden" id="stageLoading">正在加载…</div>
     <div class="pop" id="pop"></div>
     <div class="confetti" id="confetti"></div>
     <div class="caption" id="caption"><div class="who" id="capWho"></div><div class="line" id="capLine"></div></div>
@@ -527,7 +530,7 @@
 "use strict";
 /* 构建版本（2026-11-27 第六轮）：每次发版改这个串；诊断角标每行都带它，
    任何一张截图都能证明跑的是哪个版本，旧缓存再也不会悄悄顶替新版。 */
-const BUILD_VERSION = "v9"; /* 第九轮：每次发版改这个串，诊断行带版本，截图一眼可辨 */
+const BUILD_VERSION = "v10"; /* 第十轮：每次发版改这个串，诊断行带版本，截图一眼可辨 */
 const $ = id => document.getElementById(id);
 const caption = $("caption"), capWho = $("capWho"), capLine = $("capLine");
 const turnEl = $("turn"), heardEl = $("heard"), micBtn = $("micBtn"), micNote = $("micNote");
@@ -615,6 +618,11 @@ async function showSeg(key, t) {
   /* 进第二幕时释放过的第一幕片段：源还在本地 Blob 里，用到时秒挂回来，不走网络 */
   if (!v.src) { const bu = blobURLs["clips/" + key]; if (bu) v.src = bu; }
   if (v.src && v.readyState < 2) { try { v.load(); } catch (e) {} await waitEvent(v, "loadeddata", 2000); }
+  if (!v.src || v.readyState < 2) {
+    /* 第十轮：没帧不切——旧帧留在台上，黑屏比旧帧更糟；失败写进诊断，剧情照走 */
+    try { micDiag.mediaFail = "seg-" + key + " no-frame"; renderDiag(); } catch (e) {}
+    return v;
+  }
   try { if (Math.abs(v.currentTime - target) > 0.15) { v.currentTime = target; await waitEvent(v, "seeked", 1200); } } catch (e) {}
   transitionUntil = performance.now() + 700;
   v.classList.add("on");
@@ -783,10 +791,12 @@ function hideAudioRetry() {
   const b = $("audioRetry");
   if (b) b.classList.add("hidden");
 }
-$("audioRetry").onclick = () => {
+$("audioRetry").onclick = async () => {
   unlockAudio(); /* 手势里先续上会话，再重播那句 */
   const f = __audioRetryFile;
   if (!f) { hideAudioRetry(); return; }
+  /* 第十轮：重播前先把这句的 blob 补上（8 秒上限，超时就先按直连播、后台继续下） */
+  try { await Promise.race([ensureAudioReady(f), sleep(8000)]); } catch (e) {}
   playAudio(f).then(ok => { if (ok) hideAudioRetry(); });
 };
 function playAudio(file, opts) {
@@ -1122,15 +1132,66 @@ async function runPhaseJobs(ph, concurrency) {
   phaseRender(ph);
   ph.resolve();
 }
+/* 第十轮：第一回合媒体（seg1 视频＋mimi-hello 配音）是开课底线——第一回合就是
+   playSegment("seg1", [mimi-hello])，不是 seg2。排在队首先下，慢网上先下好它们。 */
+const FIRST_ROUND_KEYS = ["clips/seg1", "audio/mimi-hello"];
 function buildJobs(segs, audios, withSfx) {
   const jobs = [];
   segs.forEach(k => jobs.push({ key: "clips/" + k, url: "clips/" + SEGFILES[k], seg: k, state: "wait", got: 0, len: 0 }));
   audios.forEach(f => jobs.push({ key: "audio/" + f, url: A(f), state: "wait", got: 0, len: 0 }));
   if (withSfx) SFX_FILES.forEach(n => jobs.push({ key: "sfx/" + n, url: "sfx/" + n + ".mp3", state: "wait", got: 0, len: 0 }));
-  return jobs;
+  /* 旧版 6 个视频在前、mimi-hello 排第 7，慢网上要等前面几个视频下完才轮到它——
+     第一回合的文件提到队首，其余保持原顺序。 */
+  const pri = jobs.filter(j => FIRST_ROUND_KEYS.indexOf(j.key) !== -1);
+  const rest = jobs.filter(j => FIRST_ROUND_KEYS.indexOf(j.key) === -1);
+  return pri.concat(rest);
 }
 const phase1 = makePhase("act1", buildJobs(ACT1_SEGS, ACT1_AUDIO, true));
 const phase2 = makePhase("act2", buildJobs(ACT2_SEGS, ACT2_AUDIO, false));
+/* ---------- 开课门：第一回合媒体（第十轮） ----------
+   真机根因（代码证实）：第一回合是 seg1 视频＋mimi-hello 配音；旧版开课按钮在
+   第一阶段结算后无论失败数都放行（"大部分装好啦"），失败文件第一幕里又没有任何
+   后台续装（healFailed 只绑 online 事件）——慢网上 seg1/mimi-hello 一旦 15 秒判死，
+   开课就是黑屏（舞台底色 #000，没帧可播）＋第一句配音 play-hang（诊断行实证）。
+   修法：第一回合媒体没齐全就不许开课——缺失的先补下（可见进度），补不上明说、
+   按钮保持禁用；绝不能让用户走进黑屏＋静音的第一回合。 */
+function firstRoundJobs() { return phase1.jobs.filter(j => FIRST_ROUND_KEYS.indexOf(j.key) !== -1); }
+function firstRoundReady() { return FIRST_ROUND_KEYS.every(k => !!blobURLs[k]); }
+function fmtKB(b) { return (b >= 1048576) ? (b / 1048576).toFixed(1) + "MB" : Math.max(1, Math.round(b / 1024)) + "KB"; }
+/* 单个任务的补下：与 runPhaseJobs 里 worker 的成功/失败处理一致——成功写 blobURLs＋
+   挂视频 src；失败留 state=fail、视频退回直连。onChunk(gotBytes, totalBytes) 供调用方显示进度。 */
+async function fetchJobBlob(j, onChunk) {
+  try {
+    const u = await fetchAsBlobURL(j.url,
+      got => { j.got = got; if (onChunk) onChunk(got, j.len || 0); },
+      len => { if (!j.len) j.len = len; });
+    blobURLs[j.key] = u;
+    if (j.seg) { try { vids[j.seg].src = u; } catch (e) {} segLoaded[j.seg] = true; }
+    j.state = "ok";
+    return true;
+  } catch (e) {
+    j.state = "fail";
+    if (j.seg) { try { vids[j.seg].src = j.url; } catch (e2) {} }
+    return false;
+  }
+}
+async function ensureFirstRoundMedia() {
+  const jobs = firstRoundJobs().filter(j => !blobURLs[j.key]);
+  if (!jobs.length) return { ok: true, missing: [] };
+  const total = jobs.length;
+  let done = 0;
+  const txt = $("loadTxt");
+  const show = (extra) => { if (txt) txt.textContent = "正在准备第一课… " + done + "/" + total + (extra ? " " + extra : "") + "（动画和第一句配音，好了马上开课）"; };
+  show();
+  await Promise.all(jobs.map(async j => {
+    const name = j.url.split("/").pop();
+    const ok = await fetchJobBlob(j, (got, len) => { show(name + " " + fmtKB(got) + (len ? "/" + fmtKB(len) : "")); });
+    if (ok) { done++; show(); }
+  }));
+  phaseRender(phase1);
+  const missing = firstRoundJobs().filter(j => !blobURLs[j.key]);
+  return { ok: !missing.length, missing: missing.map(j => j.url.split("/").pop()) };
+}
 /* 批量建音频元素：一次全 load 会在弱 CPU 上顶出长任务，6 个一批、批间歇 70ms */
 async function createPhaseAudios(files) {
   const list = files.filter(f => blobURLs["audio/" + f]);
@@ -1147,11 +1208,20 @@ async function startLoading() {
   await runPhaseJobs(phase1, 4);
   await createPhaseAudios(ACT1_AUDIO);
   ensureSfx();
-  assetsReady = true;
+  /* 第十轮：开课门——第一回合媒体（seg1＋mimi-hello）没齐全，开始按钮保持禁用，
+     缺什么明说；其它文件缺失仍可按旧口径先开始（"大部分装好啦"）。 */
+  const gate = await ensureFirstRoundMedia();
+  assetsReady = gate.ok;
   const btn = $("startBtn");
-  btn.disabled = false;
-  btn.textContent = "开始上课";
-  $("loadTxt").textContent = phase1.failed().length ? "大部分装好啦，可以先开始上课！" : "装好啦，点「开始上课」！";
+  if (gate.ok) {
+    btn.disabled = false;
+    btn.textContent = "开始上课";
+    $("loadTxt").textContent = phase1.failed().length ? "大部分装好啦，可以先开始上课！" : "装好啦，点「开始上课」！";
+  } else {
+    btn.disabled = true;
+    btn.textContent = "第一课还没装好";
+    $("loadTxt").textContent = "⚠️ 第一课的动画/配音还没下好（" + gate.missing.join("、") + "），点下面「重新装这几个」再试一次——先别开课，不然会黑屏没声。";
+  }
   $("bookAct2Btn").classList.remove("hidden");
   if (save.sticker1) $("act2DirectBtn").classList.remove("hidden");
   /* 第二幕在后台继续装——第一幕玩着的时候就装齐了，进第二幕不用再等。
@@ -1165,7 +1235,17 @@ $("loadRetryBtn").onclick = async () => {
   await runPhaseJobs(phase1, 4);
   await createPhaseAudios(ACT1_AUDIO);
   phaseRender(phase1);
-  if (!phase1.failed().length) $("loadTxt").textContent = "装好啦，点「开始上课」！";
+  /* 第十轮：重试后重过开课门——第一回合媒体齐了才放行 */
+  const gate = await ensureFirstRoundMedia();
+  if (gate.ok) {
+    assetsReady = true;
+    const btn = $("startBtn");
+    btn.disabled = false;
+    btn.textContent = "开始上课";
+    $("loadTxt").textContent = phase1.failed().length ? "大部分装好啦，可以先开始上课！" : "装好啦，点「开始上课」！";
+  } else {
+    $("loadTxt").textContent = "⚠️ 第一课的动画/配音还没下好（" + gate.missing.join("、") + "），再点一次「重新装这几个」。";
+  }
 };
 $("act2RetryBtn").onclick = async () => {
   await runPhaseJobs(phase2, 1);
@@ -1190,6 +1270,17 @@ async function healFailed() {
       phaseRender(phase1);
       if (assetsReady && !phase1.failed().length && !$("startVeil").classList.contains("hidden"))
         $("loadTxt").textContent = "网络回来啦，装好啦，点「开始上课」！";
+      /* 第十轮：断网恢复后重过开课门——第一回合媒体齐了才放行 */
+      if (!assetsReady && !$("startVeil").classList.contains("hidden")) {
+        const gate = await ensureFirstRoundMedia();
+        if (gate.ok) {
+          assetsReady = true;
+          const btn = $("startBtn");
+          btn.disabled = false;
+          btn.textContent = "开始上课";
+          $("loadTxt").textContent = "网络回来啦，第一课装好啦，点「开始上课」！";
+        }
+      }
     }
     if (phase2.failed().length) {
       phase2.jobs.forEach(j => { if (j.state === "fail") j.state = "wait"; });
@@ -1333,10 +1424,86 @@ function audioDurMs(f) {
   const a = AC[f];
   return (a && isFinite(a.duration) && a.duration > 0) ? a.duration * 1000 : 2500;
 }
+/* ---------- 回合开始前的媒体守门（第十轮） ----------
+   真机根因（代码证实）：playSegment/speakOver 开场不校验本段媒体——showSeg 对已在
+   台上的段根本不等 loadeddata（直接 seek 即返），对新段等 2000ms 也照样切过去；
+   playAudio 对没数据的直连元素直接 play()，2 秒不 settle 就 play-hang。结果就是
+   截图里的黑屏＋静音第一回合。修法：播之前先把本段视频/配音的 blob 备齐（可见
+   “正在加载…”、现拉到为止），备不齐就明说并写进诊断，绝不切黑屏、绝不悄悄 play-hang。 */
+function showStageLoading(text) { const el = $("stageLoading"); if (!el) return; el.textContent = text; el.classList.remove("hidden"); }
+function hideStageLoading() { const el = $("stageLoading"); if (el) el.classList.add("hidden"); }
+function findPhaseJob(key) {
+  for (const ph of [phase1, phase2]) { const j = ph.jobs.find(x => x.key === key); if (j) return { job: j, ph: ph }; }
+  return null;
+}
+function diagMediaFail(what, why) {
+  try {
+    micDiag.mediaFail = what + " " + why;
+    audioLog({ file: what, src: "—", result: "media-not-ready:" + why, ended: false, ctMoved: false, ms: 0, st: "?" });
+    renderDiag();
+  } catch (e) {}
+}
+async function ensureSegReady(key) {
+  const k = "clips/" + key;
+  if (blobURLs[k]) {
+    const v = vids[key];
+    if (v && !v.src) { try { v.src = blobURLs[k]; } catch (e) {} }
+    micDiag.mediaFail = null;
+    return true;
+  }
+  const found = findPhaseJob(k);
+  if (!found) { diagMediaFail("seg-" + key, "no-job"); return false; }
+  showStageLoading("正在加载动画… " + found.job.url.split("/").pop());
+  let ok = false;
+  try {
+    ok = await fetchJobBlob(found.job, (got, len) => { showStageLoading("正在加载动画… " + fmtKB(got) + (len ? "/" + fmtKB(len) : "")); });
+  } catch (e) { ok = false; }
+  hideStageLoading();
+  if (!ok) { diagMediaFail("seg-" + key, "download-fail"); return false; }
+  const v = vids[key];
+  if (v) {
+    if (v.readyState < 2) { try { v.load(); await waitEvent(v, "loadeddata", 5000); } catch (e) {} }
+    if (v.readyState < 2) { diagMediaFail("seg-" + key, "no-frame"); return false; }
+  }
+  micDiag.mediaFail = null;
+  return true;
+}
+async function ensureAudioReady(file) {
+  const k = "audio/" + file;
+  if (blobURLs[k]) {
+    /* 缓存元素可能还是旧的直连 src（blob 是后到的）：换成 blob 元素再播 */
+    const a = AC[file];
+    if (a && audioSrcKind(a.src) !== "blob") { try { a.pause(); a.removeAttribute("src"); a.load(); } catch (e) {} delete AC[file]; }
+    micDiag.mediaFail = null;
+    return true;
+  }
+  const found = findPhaseJob(k);
+  if (!found) { diagMediaFail(file, "no-job"); return false; }
+  showStageLoading("正在下载配音… " + found.job.url.split("/").pop());
+  let ok = false;
+  try {
+    ok = await fetchJobBlob(found.job, (got, len) => { showStageLoading("正在下载配音… " + fmtKB(got) + (len ? "/" + fmtKB(len) : "")); });
+  } catch (e) { ok = false; }
+  hideStageLoading();
+  if (!ok) { diagMediaFail(file, "download-fail"); return false; }
+  const a = getAudio(file);
+  if (a.readyState >= 2) { micDiag.mediaFail = null; return true; }
+  const ready = await new Promise(res => {
+    let done = false;
+    const fin2 = v => { if (!done) { done = true; res(v); } };
+    a.addEventListener("canplay", () => fin2(true), { once: true });
+    a.addEventListener("error", () => fin2(false), { once: true });
+    setTimeout(() => fin2(a.readyState >= 2), 5000);
+  });
+  if (!ready) { diagMediaFail(file, "not-ready"); return false; }
+  micDiag.mediaFail = null;
+  return true;
+}
 /* 播放一段动画：Blob 本地播放＋看门狗护航；配音按 delay/at 调度对齐嘴动窗口 */
 async function playSegment(segKey, lines) {
   hideCaption();
   turnEl.classList.remove("show");
+  await ensureSegReady(segKey); /* 第十轮：本段视频没备齐先现拉，拉不到也不切黑屏（showSeg 会留住旧帧） */
   const v = await showSeg(segKey, 0);
   setBreathe(v, false);
   armWatchdog(v);
@@ -1350,13 +1517,16 @@ async function playSegment(segKey, lines) {
     if (effWait) await sleep(effWait);
     elapsed += wait + audioDurMs(ln.audio);
     showCaption(ln.who, ln.text);
-    await playAudio(ln.audio);
+    /* 第十轮：本句配音没备齐先现拉；拉不到就亮横幅、写进诊断，字幕照走、剧情不等死 */
+    if (await ensureAudioReady(ln.audio)) await playAudio(ln.audio);
+    else showAudioRetry(ln.audio, "not-ready");
     if (v.ended) setBreathe(v, true); /* 视频先播完、配音还没完：定格帧保持呼吸，别死冻 */
   }
   freezeFrame(v);
 }
 /* 反应台词专用：垫上说话角色本人的动画重播（可指定循环窗口），嘴动着说，不再对着静帧说话 */
 async function speakOver(segKey, who, text, audio, fromT, loopToT) {
+  await ensureSegReady(segKey); /* 第十轮：本段视频没备齐先现拉，拉不到也不切黑屏 */
   const v = await showSeg(segKey, fromT || 0);
   setBreathe(v, false);
   armWatchdog(v);
@@ -1368,7 +1538,9 @@ async function speakOver(segKey, who, text, audio, fromT, loopToT) {
   }
   await playVid(v);
   showCaption(who, text);
-  await playAudio(audio);
+  /* 第十轮：本句配音没备齐先现拉；拉不到就亮横幅、写进诊断，字幕照走、剧情不等死 */
+  if (await ensureAudioReady(audio)) await playAudio(audio);
+  else showAudioRetry(audio, "not-ready");
   if (loopTimer) clearInterval(loopTimer);
   freezeFrame(v);
 }
@@ -2115,6 +2287,7 @@ function renderDiag() {
   let txt = "🎤 " + BUILD_VERSION + " · " + micDiag.turn + (micDiag.events.length ? "：" + micDiag.events.join(" → ") : "");
   if (window.__audioFailCount) txt += " | 🔊音频失败×" + window.__audioFailCount + "（最近：" + window.__audioLastFail + "）";
   if (micDiag.wordFail) txt += " | 🔊单词失败：" + micDiag.wordFail;
+  if (micDiag.mediaFail) txt += " | 📦媒体未就绪：" + micDiag.mediaFail;
   const lt = micDiag.lastTurn;
   if (lt) {
     const s = v => (v == null ? "?" : (v / 1000).toFixed(1) + "s");
