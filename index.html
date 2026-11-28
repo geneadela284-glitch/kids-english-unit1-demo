@@ -531,7 +531,7 @@
 /* 构建版本（2026-11-27 第六轮）：每次发版改这个串；诊断角标每行都带它，
    任何一张截图都能证明跑的是哪个版本，旧缓存再也不会悄悄顶替新版。 */
 /* v13（2026-11-28）：回滚 v12，恢复 v11 的声音；除版本号外内容与 v11 字节一致。 */
-const BUILD_VERSION = "v15"; /* 第十五轮：每次发版改这个串，诊断行带版本，截图一眼可辨 */
+const BUILD_VERSION = "v16"; /* 第十六轮：每次发版改这个串，诊断行带版本，截图一眼可辨 */
 const $ = id => document.getElementById(id);
 const caption = $("caption"), capWho = $("capWho"), capLine = $("capLine");
 const turnEl = $("turn"), heardEl = $("heard"), micBtn = $("micBtn"), micNote = $("micNote");
@@ -606,13 +606,51 @@ function waitEvent(el, name, ms) {
    现在切过去之前先等首帧：没数据先 load（有界 2000ms），再拨到目标点等 seeked
    （有界 1200ms）；旧帧一直留在台上，直到新帧就绪才淡变——任何一次切段都不出黑帧；
    超时也切，不死等剧情。t 为目标起始秒数（默认 0）。 */
+/* v16 兜底：元素卡死时先硬复位、再换新元素（各只做一次，不循环）。
+   返回最终可用的元素；仍无帧返回 null。调用方负责把返回的元素加 on、
+   设为 activeVid（新元素刚建好时还没上台）。 */
+async function recoverSegVid(key, v) {
+  /* 第 1 级：硬复位——清掉卡死的加载状态，直连地址重拉 */
+  try {
+    v.pause();
+    v.removeAttribute("src");
+    try { v.load(); } catch (e) {}
+    if (SEGFILES[key]) {
+      v.src = "clips/" + SEGFILES[key];
+      try { v.load(); } catch (e) {}
+      await waitEvent(v, "loadeddata", 2000);
+    }
+  } catch (e) {}
+  if (v.readyState >= 2) return v;
+  /* 第 2 级：换新元素——旧元素可能已彻底卡死，新建一个同款元素顶替 */
+  try {
+    const nv = document.createElement("video");
+    nv.muted = true; nv.setAttribute("muted", ""); nv.setAttribute("playsinline", "");
+    nv.preload = "auto";
+    if (SEGFILES[key]) nv.src = "clips/" + SEGFILES[key];
+    const pool = $("pool");
+    if (pool && v.parentNode === pool) pool.replaceChild(nv, v);
+    else if (pool) pool.appendChild(nv);
+    vids[key] = nv;
+    if (activeVid === v) activeVid = nv;
+    try { nv.load(); } catch (e) {}
+    await waitEvent(nv, "loadeddata", 2000);
+    if (nv.readyState >= 2) return nv;
+  } catch (e) {}
+  return null;
+}
 async function showSeg(key, t) {
-  const v = vids[key];
+  let v = vids[key]; /* v16：恢复可能换新元素，须可重指 */
   if (!v) return null;
   const target = (t == null ? 0 : t);
+  /* 恢复成功后清掉本段的失败标志（v15 的粘性标志须由成功来擦除，只清本段的） */
+  const clearVidFail = () => {
+    try { if (micDiag.vidFail && micDiag.vidFail.indexOf("seg-" + key) === 0) { micDiag.vidFail = null; renderDiag(); } } catch (e) {}
+  };
   if (activeVid === v) {
     /* 已在台上：先确认有帧（v11 式缺 load()：首屏 seg1 可能一直没数据，黑屏露底）。
-       没数据就 load 并等首帧（有界 2000ms），再把时间拨到目标点等 seeked。 */
+       没数据就 load 并等首帧（有界 2000ms），再把时间拨到目标点等 seeked。
+       v16：元素已可见（on 在身上），iOS 才肯给它加载数据；不再藏起来等。 */
     if (v.readyState < 2) { try { v.load(); } catch (e) {} await waitEvent(v, "loadeddata", 2000); }
     if (v.readyState < 2) {
       /* v15：blob 源无帧时换直连地址重试一次（只做一次） */
@@ -624,16 +662,31 @@ async function showSeg(key, t) {
         }
       } catch (e) {}
       if (v.readyState < 2) {
-        try { micDiag.vidFail = "seg-" + key + " no-frame"; renderDiag(); } catch (e) {}
-        return v;
+        /* v16：硬复位＋换新元素兜底（各一次）；恢复成功就用恢复后的元素 */
+        const rv = await recoverSegVid(key, v);
+        if (rv) { v = rv; }
+        else {
+          try { micDiag.vidFail = "seg-" + key + " no-frame"; renderDiag(); } catch (e) {}
+          return v;
+        }
       }
     }
+    /* 恢复后的元素（可能换了新的）确保在台上可见 */
+    try { v.classList.add("on"); activeVid = v; } catch (e) {}
+    clearVidFail();
     try { if (Math.abs(v.currentTime - target) > 0.15) { v.currentTime = target; await waitEvent(v, "seeked", 1200); } } catch (e) {}
     return v;
   }
   const old = activeVid;
   /* 进第二幕时释放过的第一幕片段：源还在本地 Blob 里，用到时秒挂回来，不走网络 */
   if (!v.src) { const bu = blobURLs["clips/" + key]; if (bu) v.src = bu; }
+  /* v16：先亮再等——先把新段加 on、设为在台视频，iOS 才肯给可见的视频加载数据；
+     再 load 并等首帧（有界 2000ms）。帧没到也不摘 on，继续走兜底。 */
+  v.classList.add("on");
+  activeVid = v;
+  transitionUntil = performance.now() + 700;
+  /* 淡变 180ms 一到就停掉旧的一路并移出合成树：两路同时解码+合成的窗口压到最短 */
+  if (old) setTimeout(() => { old.classList.remove("on"); old.pause(); old.classList.remove("breathe"); }, 190);
   if (v.src && v.readyState < 2) { try { v.load(); } catch (e) {} await waitEvent(v, "loadeddata", 2000); }
   if (!v.src || v.readyState < 2) {
     /* v15：blob 源无帧时换直连地址重试一次（只做一次） */
@@ -645,17 +698,19 @@ async function showSeg(key, t) {
       }
     } catch (e) {}
     if (!v.src || v.readyState < 2) {
-      /* 第十轮：没帧不切——旧帧留在台上，黑屏比旧帧更糟；失败写进诊断，剧情照走 */
-      try { micDiag.vidFail = "seg-" + key + " no-frame"; renderDiag(); } catch (e) {}
-      return v;
+      /* v16：硬复位＋换新元素兜底（各一次）；恢复成功就用恢复后的元素 */
+      const rv = await recoverSegVid(key, v);
+      if (rv) { v = rv; try { v.classList.add("on"); activeVid = v; } catch (e) {} }
+      else {
+        /* v16：仍无帧——元素保持可见（摘掉 on 会重新藏起来、更拉不到数据），
+           失败写进诊断，剧情照走 */
+        try { micDiag.vidFail = "seg-" + key + " no-frame"; renderDiag(); } catch (e) {}
+        return v;
+      }
     }
   }
+  clearVidFail();
   try { if (Math.abs(v.currentTime - target) > 0.15) { v.currentTime = target; await waitEvent(v, "seeked", 1200); } } catch (e) {}
-  transitionUntil = performance.now() + 700;
-  v.classList.add("on");
-  activeVid = v;
-  /* 淡变 180ms 一到就停掉旧的一路并移出合成树：两路同时解码+合成的窗口压到最短 */
-  if (old) setTimeout(() => { old.classList.remove("on"); old.pause(); old.classList.remove("breathe"); }, 190);
   return v;
 }
 /* 空闲预热：回合一开始就把答对/答错要重播的那段首帧解出来（不播出，只备好），
@@ -1161,16 +1216,17 @@ function unlockAudio() {
 /* 手势内全量解锁（2026-11-28 第十四轮）：真机根因（诊断页证实）——课程页
    在没有用户手势的时候调 play()（下载/定时器之后），iOS 不放行，play() 悬住、
    视频无帧；诊断页点按处理里同步 load()＋play() 则三路全通。
-   修法：每个开始手势的同步段里（任何 await 之前），把本幕要用的全部媒体元素
-   依次 load()＋play()＋pause()，并同步 resume 共享 AudioContext。play() 必须
+   修法：每个开始手势的同步段里（任何 await 之前），把本幕要用的媒体元素
+   （v16：视频只第一段，音频全部）依次 load()＋play()＋pause()，并同步 resume 共享 AudioContext。play() 必须
    在手势同步段里调用；pause 只是收尾，不影响解锁本身——音频 70ms 后暂停归零
    （与旧 prime 同手法），视频等 playing 事件起来再暂停归零（2 秒没起来也收尾，
    免得 70ms 暂停掐断还没数据的加载）。没数据的元素跳过（ensureSegReady /
    ensureAudioReady 会在播前现拉，播出本身已改走 Web Audio）。 */
 function unlockAllMedia(segKeys, audioFiles) {
   try { unlockAudio(); } catch (e) {} /* 单元素点火＋共享 AudioContext resume（手势内） */
-  /* 视频：本幕各段依次 load＋静音播（元素创建时已 muted=true） */
-  (segKeys || []).forEach(k => {
+  /* 视频（v16）：只解锁第一段——一次 play 全部 6 段会把 iOS 解码器占满，
+     元素再也拉不到数据；其余段由 showSeg/ensureSegReady 用到时再解锁 */
+  (segKeys || []).slice(0, 1).forEach(k => {
     const v = vids[k];
     if (!v) return;
     try {
