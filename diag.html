@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>媒体诊断</title>
+<style>body{font-family:sans-serif;padding:16px}button{display:block;width:100%;padding:16px;margin:12px 0;font-size:18px}pre{background:#eee;padding:12px;white-space:pre-wrap;font-size:15px}video{width:100%;background:#000}audio{width:100%}</style>
+</head>
+<body>
+<h1>媒体诊断</h1>
+<button id="btnWA">1. 播配音（Web Audio 路）</button>
+<pre id="logWA">未测</pre>
+<button id="btnAU">2. 播配音（普通 audio 标签）</button>
+<audio id="au" src="audio/mimi-hello.mp3" controls preload="auto"></audio>
+<pre id="logAU">未测</pre>
+<button id="btnVI">3. 播视频（video 标签，静音）</button>
+<video id="vi" src="clips/seg1-mimi-hello.mp4" controls muted playsinline preload="auto"></video>
+<pre id="logVI">未测</pre>
+<button id="btnBV">4. 播视频（blob 地址）</button>
+<video id="bv" controls muted playsinline preload="auto"></video>
+<pre id="logBV">未测</pre>
+<button id="btnV11">5. 播视频（11 个 video 元素同时存在，第 1 个可见）</button>
+<pre id="logV11">未测</pre>
+<button id="btnA70">6. 播视频（70 个 audio 元素＋1 个 video）</button>
+<pre id="logA70">未测</pre>
+<script>
+const $=id=>document.getElementById(id);
+function log(el,msg){if(el.textContent==='未测')el.textContent='';el.textContent+=new Date().toLocaleTimeString()+' '+msg+'\n';}
+let actx=null;
+$('btnWA').onclick=async()=>{
+  const L=$('logWA'); L.textContent='';
+  try{
+    if(!actx) actx=new (window.AudioContext||window.webkitAudioContext)();
+    log(L,'AudioContext state='+actx.state);
+    if(actx.state==='suspended'){await actx.resume(); log(L,'resume 后 state='+actx.state);}
+    const t0=performance.now();
+    const r=await fetch('audio/mimi-hello.mp3'); log(L,'fetch ok status='+r.status+' 耗时 '+(performance.now()-t0).toFixed(0)+'ms');
+    const buf=await r.arrayBuffer(); log(L,'arrayBuffer 字节='+buf.byteLength);
+    const ab=await actx.decodeAudioData(buf); log(L,'decode ok 时长='+ab.duration.toFixed(2)+'s 声道='+ab.numberOfChannels);
+    const src=actx.createBufferSource(); src.buffer=ab; src.connect(actx.destination);
+    src.onended=()=>log(L,'onended 播完了 currentTime='+actx.currentTime.toFixed(2));
+    src.start(); log(L,'start 已调用 currentTime='+actx.currentTime.toFixed(2));
+    setTimeout(()=>log(L,'1s 后 currentTime='+actx.currentTime.toFixed(2)+' state='+actx.state),1000);
+    setTimeout(()=>log(L,'3s 后 currentTime='+actx.currentTime.toFixed(2)+' state='+actx.state),3000);
+    setTimeout(()=>log(L,'5s 后 currentTime='+actx.currentTime.toFixed(2)+' state='+actx.state),5000);
+  }catch(e){log(L,'出错: '+(e&&e.message?e.message:e));}
+};
+$('btnAU').onclick=async()=>{
+  const L=$('logAU'); L.textContent=''; const a=$('au');
+  try{
+    log(L,'点击前 readyState='+a.readyState+' paused='+a.paused);
+    a.load(); log(L,'load() 已调');
+    const p=a.play(); log(L,'play() 已调，返回 '+(p?'promise':'undefined'));
+    if(p){p.then(()=>log(L,'play() resolved paused='+a.paused)).catch(e=>log(L,'play() rejected: '+e.message));}
+    setTimeout(()=>log(L,'1s 后 currentTime='+a.currentTime.toFixed(2)+' paused='+a.paused+' readyState='+a.readyState),1000);
+    setTimeout(()=>log(L,'3s 后 currentTime='+a.currentTime.toFixed(2)+' paused='+a.paused+' readyState='+a.readyState),3000);
+    setTimeout(()=>log(L,'5s 后 currentTime='+a.currentTime.toFixed(2)+' paused='+a.paused+' readyState='+a.readyState),5000);
+  }catch(e){log(L,'出错: '+(e&&e.message?e.message:e));}
+};
+$('btnVI').onclick=async()=>{
+  const L=$('logVI'); L.textContent=''; const v=$('vi');
+  try{
+    log(L,'点击前 readyState='+v.readyState+' paused='+v.paused+' videoWidth='+v.videoWidth);
+    v.load(); log(L,'load() 已调');
+    const p=v.play(); log(L,'play() 已调，返回 '+(p?'promise':'undefined'));
+    if(p){p.then(()=>log(L,'play() resolved paused='+v.paused)).catch(e=>log(L,'play() rejected: '+e.message));}
+    setTimeout(()=>log(L,'1s 后 currentTime='+v.currentTime.toFixed(2)+' paused='+v.paused+' readyState='+v.readyState+' videoWidth='+v.videoWidth),1000);
+    setTimeout(()=>log(L,'3s 后 currentTime='+v.currentTime.toFixed(2)+' paused='+v.paused+' readyState='+v.readyState+' videoWidth='+v.videoWidth),3000);
+    setTimeout(()=>log(L,'5s 后 currentTime='+v.currentTime.toFixed(2)+' paused='+v.paused+' readyState='+v.readyState+' videoWidth='+v.videoWidth),5000);
+  }catch(e){log(L,'出错: '+(e&&e.message?e.message:e));}
+};
+$('btnBV').onclick=async()=>{
+  const L=$('logBV'); L.textContent=''; const v=$('bv');
+  try{
+    const t0=performance.now();
+    const r=await fetch('clips/seg1-mimi-hello.mp4'); log(L,'fetch ok status='+r.status+' 耗时 '+(performance.now()-t0).toFixed(0)+'ms');
+    const b=await r.blob(); log(L,'blob 字节='+b.size+' 类型='+b.type);
+    const u=URL.createObjectURL(b); log(L,'blob URL 已建');
+    v.src=u; log(L,'src 已设 点击前 readyState='+v.readyState+' paused='+v.paused+' videoWidth='+v.videoWidth);
+    v.load(); log(L,'load() 已调');
+    const p=v.play(); log(L,'play() 已调，返回 '+(p?'promise':'undefined'));
+    if(p){p.then(()=>log(L,'play() resolved paused='+v.paused)).catch(e=>log(L,'play() rejected: '+e.message));}
+    setTimeout(()=>log(L,'1s 后 currentTime='+v.currentTime.toFixed(2)+' paused='+v.paused+' readyState='+v.readyState+' videoWidth='+v.videoWidth),1000);
+    setTimeout(()=>log(L,'3s 后 currentTime='+v.currentTime.toFixed(2)+' paused='+v.paused+' readyState='+v.readyState+' videoWidth='+v.videoWidth),3000);
+    setTimeout(()=>log(L,'5s 后 currentTime='+v.currentTime.toFixed(2)+' paused='+v.paused+' readyState='+v.readyState+' videoWidth='+v.videoWidth),5000);
+  }catch(e){log(L,'出错: '+(e&&e.message?e.message:e));}
+};
+/* 5. v17 根因验证：课程页旧版是 11 个 video 元素（第 1 个 preload auto、其余 none）。
+   第 1 个可见（排除“隐藏不加载”的干扰），只验“11 个元素本身是否堵加载”。 */
+$('btnV11').onclick=async()=>{
+  const L=$('logV11'); L.textContent='';
+  try{
+    const vs=[];
+    for(let i=0;i<11;i++){
+      const v=document.createElement('video');
+      v.muted=true; v.setAttribute('muted',''); v.setAttribute('playsinline','');
+      v.preload=(i===0)?'auto':'none';
+      if(i>0) v.style.cssText='position:absolute;left:-9999px;top:-9999px;width:160px;height:90px;';
+      else v.style.cssText='width:100%;background:#000;';
+      document.body.appendChild(v); vs.push(v);
+    }
+    const v0=vs[0];
+    v0.src='clips/seg1-mimi-hello.mp4';
+    v0.load(); log(L,'11 个 video 已建（第 1 个可见、其余移出屏幕），第 1 个设直连 seg1、load() 已调');
+    const p=v0.play(); log(L,'第 1 个 play() 已调，返回 '+(p?'promise':'undefined'));
+    if(p){p.then(()=>log(L,'第 1 个 play() resolved paused='+v0.paused)).catch(e=>log(L,'第 1 个 play() rejected: '+e.message));}
+    setTimeout(()=>{log(L,'2s 后：'+vs.map((v,i)=>'#'+i+' rs='+v.readyState+' w='+v.videoWidth).join(' | '));},2000);
+    setTimeout(()=>{log(L,'5s 后第 1 个 currentTime='+v0.currentTime.toFixed(2)+' paused='+v0.paused+' readyState='+v0.readyState+' videoWidth='+v0.videoWidth);},5000);
+  }catch(e){log(L,'出错: '+(e&&e.message?e.message:e));}
+};
+/* 6. v17 根因验证：课程页旧版一节课建约 70 个 <audio>（对话/音效/单词回退路）。
+   70 个 audio（muted、preload none、不占画面）＋1 个可见 video，验 audio
+   元素是否堵 video 加载。 */
+$('btnA70').onclick=async()=>{
+  const L=$('logA70'); L.textContent='';
+  try{
+    for(let i=0;i<70;i++){
+      const a=document.createElement('audio');
+      a.muted=true; a.preload='none';
+      document.body.appendChild(a);
+    }
+    const v=document.createElement('video');
+    v.muted=true; v.setAttribute('muted',''); v.setAttribute('playsinline',''); v.preload='auto';
+    v.style.cssText='width:100%;background:#000;';
+    document.body.appendChild(v);
+    v.src='clips/seg1-mimi-hello.mp4';
+    v.load(); log(L,'70 个 audio（muted、preload none）＋1 个 video 已建，video 设直连 seg1、load() 已调');
+    const p=v.play(); log(L,'video play() 已调，返回 '+(p?'promise':'undefined'));
+    if(p){p.then(()=>log(L,'video play() resolved paused='+v.paused)).catch(e=>log(L,'video play() rejected: '+e.message));}
+    setTimeout(()=>{log(L,'2s 后 video readyState='+v.readyState+' videoWidth='+v.videoWidth+' currentTime='+v.currentTime.toFixed(2)+' paused='+v.paused);},2000);
+    setTimeout(()=>{log(L,'5s 后 video readyState='+v.readyState+' videoWidth='+v.videoWidth+' currentTime='+v.currentTime.toFixed(2)+' paused='+v.paused);},5000);
+  }catch(e){log(L,'出错: '+(e&&e.message?e.message:e));}
+};
+</script>
+</body>
+</html>

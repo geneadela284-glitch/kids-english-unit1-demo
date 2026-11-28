@@ -531,7 +531,7 @@
 /* 构建版本（2026-11-27 第六轮）：每次发版改这个串；诊断角标每行都带它，
    任何一张截图都能证明跑的是哪个版本，旧缓存再也不会悄悄顶替新版。 */
 /* v13（2026-11-28）：回滚 v12，恢复 v11 的声音；除版本号外内容与 v11 字节一致。 */
-const BUILD_VERSION = "v16"; /* 第十六轮：每次发版改这个串，诊断行带版本，截图一眼可辨 */
+const BUILD_VERSION = "v17"; /* 第十七轮：每次发版改这个串，诊断行带版本，截图一眼可辨 */
 const $ = id => document.getElementById(id);
 const caption = $("caption"), capWho = $("capWho"), capLine = $("capLine");
 const turnEl = $("turn"), heardEl = $("heard"), micBtn = $("micBtn"), micNote = $("micNote");
@@ -574,23 +574,26 @@ function pickVar(key, arr) {
   return arr[i];
 }
 
-/* ---------- 视频池：六段先整段下成 Blob 再本地播放，播放中零网络依赖 ---------- */
+/* ---------- 视频：单元素舞台（2026-11-28 第十七轮） ----------
+   真机根因（v16 诊断行证实，勿推翻）：课程页 11 个 <video>＋约 70 个 <audio>
+   把 iOS 的媒体通道堵死了——全新换上的视频元素、直连地址，2000ms 内一帧都
+   拉不到（rs=0），而同一份文件在 diag.html（单元素）直连和 blob 都能出帧。
+   修法：舞台只留一个 <video>；切段就是换这个元素的 src；段数据只存在
+   blobURLs 里（下载器不再往元素上挂 src），不再每个段占一个元素。 */
 const SEGFILES = {
   seg1: "seg1-mimi-hello.mp4", seg2: "seg2-peter-bag.mp4", seg3: "seg3-peter-age.mp4",
   seg4: "seg4-peter-from.mp4", seg5: "seg5-peter-fromok.mp4", seg6: "seg6-lulu-class.mp4",
   seg7: "seg7-smith-rollcall.mp4", seg8: "seg8-parrot-chaos.mp4", seg9: "seg9-peter-twin.mp4",
   seg10: "seg10-lulu-band.mp4", seg11: "seg11-smith-stamp.mp4"
 };
-const vids = {};
-let activeVid = null;
-for (const k in SEGFILES) {
-  const v = document.createElement("video");
-  v.muted = true; v.setAttribute("muted", ""); v.setAttribute("playsinline", "");
-  /* 只让第一段（首屏活背景）预载，其余按需加载：避免 11 路视频同时预解码压垮手机 */
-  v.preload = (k === "seg1") ? "auto" : "none";
-  $("pool").appendChild(v);
-  vids[k] = v;
-}
+const stageVid = document.createElement("video");
+stageVid.muted = true; stageVid.setAttribute("muted", ""); stageVid.setAttribute("playsinline", "");
+stageVid.preload = "auto";
+$("pool").appendChild(stageVid);
+let activeVid = stageVid;   /* 始终指向单元素（与旧代码的 activeVid 兼容） */
+let stageSegKey = null;     /* 单元素当前挂的是哪一段（src 对应用） */
+const vids = {};            /* 兼容旧调用：vids[key] 恒为单元素 */
+for (const k in SEGFILES) vids[k] = stageVid;
 /* 过渡保护窗（2026-11-27 第五轮）：切段淡变与看门狗硬恢复、后台下载在此窗内让路 */
 let transitionUntil = 0;
 function waitEvent(el, name, ms) {
@@ -606,128 +609,79 @@ function waitEvent(el, name, ms) {
    现在切过去之前先等首帧：没数据先 load（有界 2000ms），再拨到目标点等 seeked
    （有界 1200ms）；旧帧一直留在台上，直到新帧就绪才淡变——任何一次切段都不出黑帧；
    超时也切，不死等剧情。t 为目标起始秒数（默认 0）。 */
-/* v16 兜底：元素卡死时先硬复位、再换新元素（各只做一次，不循环）。
-   返回最终可用的元素；仍无帧返回 null。调用方负责把返回的元素加 on、
-   设为 activeVid（新元素刚建好时还没上台）。 */
-async function recoverSegVid(key, v) {
-  /* 第 1 级：硬复位——清掉卡死的加载状态，直连地址重拉 */
-  try {
-    v.pause();
-    v.removeAttribute("src");
-    try { v.load(); } catch (e) {}
-    if (SEGFILES[key]) {
-      v.src = "clips/" + SEGFILES[key];
-      try { v.load(); } catch (e) {}
-      await waitEvent(v, "loadeddata", 2000);
-    }
-  } catch (e) {}
-  if (v.readyState >= 2) return v;
-  /* 第 2 级：换新元素——旧元素可能已彻底卡死，新建一个同款元素顶替 */
-  try {
-    const nv = document.createElement("video");
-    nv.muted = true; nv.setAttribute("muted", ""); nv.setAttribute("playsinline", "");
-    nv.preload = "auto";
-    if (SEGFILES[key]) nv.src = "clips/" + SEGFILES[key];
-    const pool = $("pool");
-    if (pool && v.parentNode === pool) pool.replaceChild(nv, v);
-    else if (pool) pool.appendChild(nv);
-    vids[key] = nv;
-    if (activeVid === v) activeVid = nv;
-    try { nv.load(); } catch (e) {}
-    await waitEvent(nv, "loadeddata", 2000);
-    if (nv.readyState >= 2) return nv;
-  } catch (e) {}
-  return null;
-}
+/* 切段（v17 单元素）：舞台只有一个 <video>，切段就是换它的 src。
+   同一段内连续台词（src 已是本段）不重拉，只确认有帧、拨到目标点；
+   换段先淡出（摘 .on，约 150ms），再设 src（blob 优先、无 blob 用直连）、
+   load、等首帧（有界 2000ms）、seek 到目标点、加 .on 淡入。
+   无帧记 vidFail（粘性，v15 口径），但保持元素可见、让它在后台继续加载，
+   不摘 .on。t 为目标起始秒数（默认 0）。返回单元素。 */
 async function showSeg(key, t) {
-  let v = vids[key]; /* v16：恢复可能换新元素，须可重指 */
-  if (!v) return null;
+  const v = stageVid;
   const target = (t == null ? 0 : t);
-  /* 恢复成功后清掉本段的失败标志（v15 的粘性标志须由成功来擦除，只清本段的） */
+  /* 成功后清掉本段的失败标志（v15 的粘性标志须由成功来擦除，只清本段的） */
   const clearVidFail = () => {
     try { if (micDiag.vidFail && micDiag.vidFail.indexOf("seg-" + key) === 0) { micDiag.vidFail = null; renderDiag(); } } catch (e) {}
   };
-  if (activeVid === v) {
-    /* 已在台上：先确认有帧（v11 式缺 load()：首屏 seg1 可能一直没数据，黑屏露底）。
-       没数据就 load 并等首帧（有界 2000ms），再把时间拨到目标点等 seeked。
-       v16：元素已可见（on 在身上），iOS 才肯给它加载数据；不再藏起来等。 */
+  const directURL = SEGFILES[key] ? "clips/" + SEGFILES[key] : null;
+  const wantBlob = blobURLs["clips/" + key] || null;
+  /* 无帧兜底（两级，各一次，不循环）：blob→直连重试，再硬复位直连重拉。
+     返回 true=有帧，false=仍无帧（已记 vidFail、元素保持可见）。 */
+  const tryRecover = async () => {
+    if (v.src && v.src.indexOf("blob:") === 0 && directURL) {
+      try { v.pause(); v.removeAttribute("src"); v.load(); v.src = directURL; v.load(); } catch (e) {}
+      await waitEvent(v, "loadeddata", 2000);
+      if (v.readyState >= 2) return true;
+    }
+    try { v.pause(); v.removeAttribute("src"); v.load(); if (directURL) { v.src = directURL; v.load(); } await waitEvent(v, "loadeddata", 2000); } catch (e) {}
+    return v.readyState >= 2;
+  };
+  /* 同一段连续台词：src 已是本段，不重拉，只确认有帧、拨到目标点 */
+  if (stageSegKey === key && v.src) {
     if (v.readyState < 2) { try { v.load(); } catch (e) {} await waitEvent(v, "loadeddata", 2000); }
     if (v.readyState < 2) {
-      /* v15：blob 源无帧时换直连地址重试一次（只做一次） */
-      try {
-        if (v.src && v.src.indexOf("blob:") === 0 && SEGFILES[key]) {
-          v.src = "clips/" + SEGFILES[key];
-          try { v.load(); } catch (e2) {}
-          await waitEvent(v, "loadeddata", 2000);
-        }
-      } catch (e) {}
-      if (v.readyState < 2) {
-        /* v16：硬复位＋换新元素兜底（各一次）；恢复成功就用恢复后的元素 */
-        const rv = await recoverSegVid(key, v);
-        if (rv) { v = rv; }
-        else {
-          try { micDiag.vidFail = "seg-" + key + " no-frame"; renderDiag(); } catch (e) {}
-          return v;
-        }
+      const ok = await tryRecover();
+      if (!ok) {
+        try { micDiag.vidFail = "seg-" + key + " no-frame"; renderDiag(); } catch (e) {}
+        try { v.classList.add("on"); activeVid = v; } catch (e) {}
+        return v;
       }
     }
-    /* 恢复后的元素（可能换了新的）确保在台上可见 */
     try { v.classList.add("on"); activeVid = v; } catch (e) {}
     clearVidFail();
     try { if (Math.abs(v.currentTime - target) > 0.15) { v.currentTime = target; await waitEvent(v, "seeked", 1200); } } catch (e) {}
     return v;
   }
-  const old = activeVid;
-  /* 进第二幕时释放过的第一幕片段：源还在本地 Blob 里，用到时秒挂回来，不走网络 */
-  if (!v.src) { const bu = blobURLs["clips/" + key]; if (bu) v.src = bu; }
-  /* v16：先亮再等——先把新段加 on、设为在台视频，iOS 才肯给可见的视频加载数据；
-     再 load 并等首帧（有界 2000ms）。帧没到也不摘 on，继续走兜底。 */
-  v.classList.add("on");
-  activeVid = v;
+  /* 换段：先淡出（摘 .on，约 150ms），再换 src、load、等首帧、seek、淡入 */
+  try { v.classList.remove("on"); } catch (e) {}
   transitionUntil = performance.now() + 700;
-  /* 淡变 180ms 一到就停掉旧的一路并移出合成树：两路同时解码+合成的窗口压到最短 */
-  if (old) setTimeout(() => { old.classList.remove("on"); old.pause(); old.classList.remove("breathe"); }, 190);
-  if (v.src && v.readyState < 2) { try { v.load(); } catch (e) {} await waitEvent(v, "loadeddata", 2000); }
-  if (!v.src || v.readyState < 2) {
-    /* v15：blob 源无帧时换直连地址重试一次（只做一次） */
-    try {
-      if (v.src && v.src.indexOf("blob:") === 0 && SEGFILES[key]) {
-        v.src = "clips/" + SEGFILES[key];
-        try { v.load(); } catch (e2) {}
-        await waitEvent(v, "loadeddata", 2000);
-      }
-    } catch (e) {}
-    if (!v.src || v.readyState < 2) {
-      /* v16：硬复位＋换新元素兜底（各一次）；恢复成功就用恢复后的元素 */
-      const rv = await recoverSegVid(key, v);
-      if (rv) { v = rv; try { v.classList.add("on"); activeVid = v; } catch (e) {} }
-      else {
-        /* v16：仍无帧——元素保持可见（摘掉 on 会重新藏起来、更拉不到数据），
-           失败写进诊断，剧情照走 */
-        try { micDiag.vidFail = "seg-" + key + " no-frame"; renderDiag(); } catch (e) {}
-        return v;
-      }
+  await sleep(150);
+  const want = wantBlob || directURL;
+  if (want) {
+    try { v.pause(); v.removeAttribute("src"); v.load(); } catch (e) {}
+    try { v.src = want; v.load(); } catch (e) {}
+  }
+  stageSegKey = key;
+  activeVid = v;
+  if (v.readyState < 2) { await waitEvent(v, "loadeddata", 2000); }
+  if (v.readyState < 2) {
+    const ok = await tryRecover();
+    if (!ok) {
+      /* 仍无帧：元素保持可见（不摘 .on，摘掉会重新藏起来、更拉不到数据），
+         失败写进诊断，剧情照走 */
+      try { v.classList.add("on"); } catch (e) {}
+      try { micDiag.vidFail = "seg-" + key + " no-frame"; renderDiag(); } catch (e) {}
+      return v;
     }
   }
   clearVidFail();
   try { if (Math.abs(v.currentTime - target) > 0.15) { v.currentTime = target; await waitEvent(v, "seeked", 1200); } } catch (e) {}
+  try { v.classList.add("on"); } catch (e) {}
   return v;
 }
-/* 空闲预热：回合一开始就把答对/答错要重播的那段首帧解出来（不播出，只备好），
-   庆祝切段时不再现挂现解。只对不在台上的段预热；在台上的段不动，免得拨乱当前画面 */
-function warmSeg(key, t) {
-  try {
-    const v = vids[key];
-    if (!v || v === activeVid) return;
-    if (!v.src) { const bu = blobURLs["clips/" + key]; if (!bu) return; v.src = bu; }
-    if (v.readyState >= 2) { try { if (Math.abs(v.currentTime - (t || 0)) > 0.15) v.currentTime = (t || 0); } catch (e) {} return; }
-    v.addEventListener("loadeddata", () => { try { v.currentTime = (t || 0); v.pause(); } catch (e) {} }, { once: true });
-    try { v.load(); } catch (e) {}
-  } catch (e) {}
-}
-/* 首屏：第一段停在开头当活背景（带呼吸运镜，不是一张死图） */
-vids.seg1.classList.add("on"); activeVid = vids.seg1;
-vids.seg1.addEventListener("loadeddata", () => { try { vids.seg1.currentTime = 0.1; } catch (e) {} setBreathe(vids.seg1, true); }, { once: true });
+/* v17：单元素舞台无多元素可预热——warmSeg 改为空操作（调用方不动）。
+   庆祝切段由 showSeg 现挂现解（blob 本地，首帧快）。 */
+function warmSeg(key, t) { return; }
+
 
 /* ---------- 定格呼吸：暂停帧加极缓慢推近，看起来是活的 ---------- */
 function setBreathe(v, on) { if (v) v.classList.toggle("breathe", !!on); }
@@ -1124,10 +1078,10 @@ function playAudioHtml(file, opts) {
 
 /* ---------- 音效：即时触发，不阻塞剧情 ---------- */
 const SFX = {};
-function ensureSfx() {
-  SFX_FILES.forEach(n => {
-    if (!SFX[n]) { try { const a = new Audio(sfxURL(n)); a.preload = "auto"; SFX[n] = a; } catch (e) {} }
-  });
+/* v17：音效元素懒创建——只在 HTML 回退真要播某一个时才建那一个，不再一次建 7 个。 */
+function ensureSfx(name) {
+  if (!name) return;
+  if (!SFX[name]) { try { const a = new Audio(sfxURL(name)); a.preload = "auto"; SFX[name] = a; } catch (e) {} }
 }
 async function playSfxWA(name) {
   const key = "sfx/" + name;
@@ -1155,7 +1109,7 @@ function playSfx(name) {
 }
 function playSfxHtml(name) {
   try {
-    ensureSfx();
+    ensureSfx(name); /* v17：只懒建这一个音效元素 */
     let a = SFX[name];
     if (!a) return;
     const startedAt = performance.now();
@@ -1224,54 +1178,27 @@ function unlockAudio() {
    ensureAudioReady 会在播前现拉，播出本身已改走 Web Audio）。 */
 function unlockAllMedia(segKeys, audioFiles) {
   try { unlockAudio(); } catch (e) {} /* 单元素点火＋共享 AudioContext resume（手势内） */
-  /* 视频（v16）：只解锁第一段——一次 play 全部 6 段会把 iOS 解码器占满，
-     元素再也拉不到数据；其余段由 showSeg/ensureSegReady 用到时再解锁 */
-  (segKeys || []).slice(0, 1).forEach(k => {
-    const v = vids[k];
-    if (!v) return;
-    try {
-      if (!v.src) { const bu = blobURLs["clips/" + k]; if (bu) v.src = bu; }
-      if (!v.src) return;
-      if (v.readyState < 2) { try { v.load(); } catch (e) {} }
-      let settled = false;
-      const stop = () => { if (settled) return; settled = true; try { v.pause(); v.currentTime = 0; } catch (e) {} };
-      v.addEventListener("playing", stop, { once: true });
-      setTimeout(stop, 2000);
-      const p = v.play();
-      if (p && p.catch) p.catch(() => {});
-    } catch (e) {}
-  });
-  /* 音频元素（回退路）：已有元素同步静音点火；70ms 后暂停归零、取消静音 */
-  (audioFiles || []).forEach(f => {
-    try {
-      const a = getAudio(f); /* 不存在就按当前源建一个（blob 优先） */
-      if (a.readyState < 2) { try { a.load(); } catch (e) {} }
-      a.muted = true;
-      const p = a.play();
-      if (p && p.catch) p.catch(() => {});
-    } catch (e) {}
-  });
-  setTimeout(() => {
-    (audioFiles || []).forEach(f => {
-      try { const a = AC[f]; if (a) { a.pause(); a.currentTime = 0; a.muted = false; } } catch (e) {}
-    });
-  }, 70);
-  /* 音效元素同上 */
+  /* 视频（v17 单元素）：只解锁第一段——设 src、load、静音 play，起来后暂停归零。
+     其余段由 showSeg 用到时再换 src。audioFiles 参数保留兼容，但 v17 不再建
+     <audio> 元素（对话/音效/单词已走 Web Audio，HTML 回退真要用时才由 getAudio
+     懒创建）；音效元素也不再批量点火。 */
   try {
-    ensureSfx();
-    SFX_FILES.forEach(n => {
-      const a = SFX[n];
-      if (!a) return;
-      try {
-        if (a.readyState < 2) { try { a.load(); } catch (e) {} }
-        a.muted = true;
-        const p = a.play();
+    const k = (segKeys || [])[0];
+    if (k) {
+      if (!stageVid.src) {
+        const bu = blobURLs["clips/" + k];
+        if (bu) { stageVid.src = bu; stageSegKey = k; }
+      }
+      if (stageVid.src) {
+        if (stageVid.readyState < 2) { try { stageVid.load(); } catch (e) {} }
+        let settled = false;
+        const stop = () => { if (settled) return; settled = true; try { stageVid.pause(); stageVid.currentTime = 0; } catch (e) {} };
+        stageVid.addEventListener("playing", stop, { once: true });
+        setTimeout(stop, 2000);
+        const p = stageVid.play();
         if (p && p.catch) p.catch(() => {});
-      } catch (e) {}
-    });
-    setTimeout(() => {
-      SFX_FILES.forEach(n => { try { const a = SFX[n]; if (a) { a.pause(); a.currentTime = 0; a.muted = false; } } catch (e) {} });
-    }, 70);
+      }
+    }
   } catch (e) {}
 }
 
@@ -1400,11 +1327,10 @@ async function runPhaseJobs(ph, concurrency) {
           got => { ph.bytesGot += (got - j.got); j.got = got; phaseRender(ph); },
           len => { if (!j.len) { j.len = len; ph.bytesTotal += len; } });
         blobURLs[j.key] = u;
-        if (j.seg) { vids[j.seg].src = u; segLoaded[j.seg] = true; }
+        if (j.seg) { segLoaded[j.seg] = true; } /* v17：只存 blob，不往单元素上挂 src（src 由 showSeg 换段时设） */
         j.state = "ok";
       } catch (e) {
-        j.state = "fail";
-        if (j.seg) { try { vids[j.seg].src = j.url; } catch (e2) {} } /* 退回直连，至少能播 */
+        j.state = "fail"; /* v17：失败不碰单元素；showSeg 无 blob 时自会用直连地址兜底 */
       }
       ph.done = ph.jobs.filter(x => x.state === "ok" || x.state === "fail").length;
       phaseRender(ph);
@@ -1453,12 +1379,11 @@ async function fetchJobBlob(j, onChunk) {
       got => { j.got = got; if (onChunk) onChunk(got, j.len || 0); },
       len => { if (!j.len) j.len = len; });
     blobURLs[j.key] = u;
-    if (j.seg) { try { vids[j.seg].src = u; } catch (e) {} segLoaded[j.seg] = true; }
+    if (j.seg) { segLoaded[j.seg] = true; } /* v17：只存 blob，不往单元素上挂 src */
     j.state = "ok";
     return true;
   } catch (e) {
     j.state = "fail";
-    if (j.seg) { try { vids[j.seg].src = j.url; } catch (e2) {} }
     return false;
   }
 }
@@ -1480,21 +1405,17 @@ async function ensureFirstRoundMedia() {
   return { ok: !missing.length, missing: missing.map(j => j.url.split("/").pop()) };
 }
 /* 批量建音频元素：一次全 load 会在弱 CPU 上顶出长任务，6 个一批、批间歇 70ms */
-async function createPhaseAudios(files) {
-  const list = files.filter(f => blobURLs["audio/" + f]);
-  for (let i = 0; i < list.length; i += 6) {
-    list.slice(i, i + 6).forEach(f => { try { getAudio(f).load(); } catch (e) {} });
-    await sleep(70);
-  }
-}
+/* v17：不再批量建 <audio> 元素（对话已走 Web Audio）——createPhaseAudios 改为空操作。 */
+async function createPhaseAudios(files) { return; }
 function markAct2Ready() {
-  act2Ready = ACT2_SEGS.every(k => !!vids[k].src);
+  /* v17：单元素的 src 只反映当前一段，改按 blob 是否下好判定第二幕就绪 */
+  act2Ready = ACT2_SEGS.every(k => !!blobURLs["clips/" + k]);
   window.__act2Ready = act2Ready;
 }
 async function startLoading() {
   await runPhaseJobs(phase1, 4);
   await createPhaseAudios(ACT1_AUDIO);
-  ensureSfx();
+  /* v17：音效元素不再批量建（ensureSfx 已改为懒创建，Web Audio 预解码在下面） */
   /* v14：后台预解码对话/音效（Web Audio 用；解不好不拦，播出时按需重试/回退） */
   primeDlgBuffers(ACT1_AUDIO.map(f => "audio/" + f));
   primeDlgBuffers(SFX_FILES.map(n => "sfx/" + n));
@@ -1596,45 +1517,19 @@ window.addEventListener("offline", () => {
    改成分批＋逐个点火：旧版在一次点击里同时点火全部音频和 10 路视频，
    真机上几十路解码器集体抢占，是全程顿挫的源头之一。现在音频每批 6 个、
    视频逐个点火，同一时刻最多多占一路视频解码器。 */
-async function primeAudios(files) {
-  const list = files.map(f => AC[f]).filter(Boolean);
-  for (let i = 0; i < list.length; i += 6) {
-    const batch = list.slice(i, i + 6);
-    batch.forEach(a => {
-      try { a.muted = true; const p = a.play(); if (p && p.catch) p.catch(() => {}); } catch (e) {}
-    });
-    await sleep(70);
-    batch.forEach(a => { try { a.pause(); a.currentTime = 0; a.muted = false; } catch (e) {} });
-  }
-}
-async function primeVids(keys) {
-  for (const k of keys) {
-    const v = vids[k];
-    if (!v || !v.src) continue;
-    try {
-      const p = v.play();
-      await Promise.race([p ? p.catch(() => {}) : Promise.resolve(), sleep(220)]);
-      v.pause();
-      try { v.currentTime = 0; } catch (e) {}
-    } catch (e) {}
-  }
-}
+/* v17：对话/音效/单词已走 Web Audio（primeDlgBuffers 预解码），不再建 <audio>
+   元素点火——primeAudios 改为空操作（调用方不动）。HTML 回退真要用时才由
+   getAudio 懒创建。 */
+async function primeAudios(files) { return; }
+/* v17：单元素舞台无多元素可预热——primeVids 改为空操作（调用方不动）。
+   首帧由 showSeg 在换段时现解（blob 本地，首帧快）。 */
+async function primeVids(keys) { return; }
 /* 音效也得在开始手势里点一次火：对话配音靠 primeAudios 解锁，音效之前没人点
    过火，iOS 真机上首次在非手势里播会被拒（静默无声）。与对话同一手法：静音
    点火 70ms 后暂停归零、取消静音。先于对话点火，离手势最近。 */
-function primeSfx() {
-  ensureSfx();
-  SFX_FILES.forEach(n => {
-    const a = SFX[n];
-    if (!a) return;
-    try {
-      a.muted = true;
-      const p = a.play();
-      if (p && p.catch) p.catch(() => {});
-      setTimeout(() => { try { a.pause(); a.currentTime = 0; a.muted = false; } catch (e) {} }, 70);
-    } catch (e) {}
-  });
-}
+/* v17：音效已走 Web Audio（primeDlgBuffers 预解码），不再建 <audio> 元素点火——
+   primeSfx 改为空操作（调用方不动）。 */
+function primeSfx() { return; }
 async function primeMedia() {
   primeSfx();
   await primeAudios(ACT1_AUDIO);
@@ -1654,13 +1549,9 @@ function releaseAct1Audios() {
 /* 进第二幕后释放第一幕片段（seg2–seg6）的解码器：卸掉 src 让浏览器回收解码缓冲，
    Blob 本体留在 blobURLs 里，回第一幕时 showSeg 按需秒挂，不走网络。
    seg1 第二幕还要当桥和反应底，seg7–seg11 是本幕正片，都不动 */
-function releaseAct1Vids() {
-  ["seg2", "seg3", "seg4", "seg5", "seg6"].forEach(k => {
-    const v = vids[k];
-    if (!v || v === activeVid || !v.src) return;
-    try { v.pause(); v.removeAttribute("src"); v.load(); } catch (e) {}
-  });
-}
+/* v17：单元素舞台没有多段解码器可释放——releaseAct1Vids 改为空操作（调用方不动）。
+   单元素只挂当前一段，换段时 showSeg 自会卸掉旧 src。 */
+function releaseAct1Vids() { return; }
 
 function lightSlot(key, value, helped) {
   const s = $("slot-" + key);
@@ -1741,8 +1632,6 @@ function diagMediaFail(what, why) {
 async function ensureSegReady(key) {
   const k = "clips/" + key;
   if (blobURLs[k]) {
-    const v = vids[key];
-    if (v && !v.src) { try { v.src = blobURLs[k]; } catch (e) {} }
     micDiag.vidFail = null;
     return true;
   }
@@ -1755,20 +1644,13 @@ async function ensureSegReady(key) {
   } catch (e) { ok = false; }
   hideStageLoading();
   if (!ok) { diagMediaFail("seg-" + key, "download-fail"); return false; }
-  const v = vids[key];
-  if (v) {
-    if (v.readyState < 2) { try { v.load(); await waitEvent(v, "loadeddata", 5000); } catch (e) {} }
-    if (v.readyState < 2) { diagMediaFail("seg-" + key, "no-frame"); return false; }
-  }
+  /* v17：只确认 blob 已下载；帧由 showSeg 在单元素上现解现验，不再这里碰元素 */
   micDiag.vidFail = null;
   return true;
 }
 async function ensureAudioReady(file) {
   const k = "audio/" + file;
   if (blobURLs[k]) {
-    /* 缓存元素可能还是旧的直连 src（blob 是后到的）：换成 blob 元素再播 */
-    const a = AC[file];
-    if (a && audioSrcKind(a.src) !== "blob") { try { a.pause(); a.removeAttribute("src"); a.load(); } catch (e) {} delete AC[file]; }
     micDiag.audFail = null;
     return true;
   }
@@ -1781,16 +1663,8 @@ async function ensureAudioReady(file) {
   } catch (e) { ok = false; }
   hideStageLoading();
   if (!ok) { diagMediaFail(file, "download-fail"); return false; }
-  const a = getAudio(file);
-  if (a.readyState >= 2) { micDiag.audFail = null; return true; }
-  const ready = await new Promise(res => {
-    let done = false;
-    const fin2 = v => { if (!done) { done = true; res(v); } };
-    a.addEventListener("canplay", () => fin2(true), { once: true });
-    a.addEventListener("error", () => fin2(false), { once: true });
-    setTimeout(() => fin2(a.readyState >= 2), 5000);
-  });
-  if (!ready) { diagMediaFail(file, "not-ready"); return false; }
+  /* v17：只确认 blob 已下载；播出走 Web Audio（decodeDlgBuffer），不再这里建 <audio> 元素。
+     HTML 回退（playAudioHtml）真要用时才由 getAudio 懒创建。 */
   micDiag.audFail = null;
   return true;
 }
@@ -2595,14 +2469,14 @@ function renderDiag() {
   /* v15：诊断行追加直播状态——当前在台视频与 AudioContext 状态，轻量、不抛错 */
   try {
     let vs = " | vid —";
-    if (activeVid) {
-      let vk = "?";
-      for (const k in vids) { if (vids[k] === activeVid) { vk = k; break; } }
-      const src = activeVid.src || "";
+    if (stageVid) {
+      /* v17 单元素：段名读 stageSegKey（vids[key] 恒为单元素，旧循环恒得 seg1） */
+      const vk = stageSegKey || "?";
+      const src = stageVid.src || "";
       const sk = src.indexOf("blob:") === 0 ? "blob" : (src.indexOf("http") === 0 ? "http" : "none");
-      vs = " | vid " + vk + " on=" + (activeVid.classList.contains("on") ? 1 : 0) +
-        " rs=" + activeVid.readyState + " paused=" + (activeVid.paused ? 1 : 0) +
-        " ct=" + activeVid.currentTime.toFixed(2) + " w=" + activeVid.videoWidth + " src=" + sk;
+      vs = " | vid " + vk + " on=" + (stageVid.classList.contains("on") ? 1 : 0) +
+        " rs=" + stageVid.readyState + " paused=" + (stageVid.paused ? 1 : 0) +
+        " ct=" + stageVid.currentTime.toFixed(2) + " w=" + stageVid.videoWidth + " src=" + sk;
     }
     txt += vs + " | ctx=" + (window.__wordCtx ? window.__wordCtx.state : "none");
   } catch (e) {}
