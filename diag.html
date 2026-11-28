@@ -23,6 +23,8 @@
 <pre id="logV11">未测</pre>
 <button id="btnA70">6. 播视频（70 个 audio 元素＋1 个 video）</button>
 <pre id="logA70">未测</pre>
+<button id="btnLP">7. 播视频（只 load() 不播 vs 再 play()）</button>
+<pre id="logLP">未测</pre>
 <script>
 const $=id=>document.getElementById(id);
 function log(el,msg){if(el.textContent==='未测')el.textContent='';el.textContent+=new Date().toLocaleTimeString()+' '+msg+'\n';}
@@ -129,6 +131,27 @@ $('btnA70').onclick=async()=>{
     if(p){p.then(()=>log(L,'video play() resolved paused='+v.paused)).catch(e=>log(L,'video play() rejected: '+e.message));}
     setTimeout(()=>{log(L,'2s 后 video readyState='+v.readyState+' videoWidth='+v.videoWidth+' currentTime='+v.currentTime.toFixed(2)+' paused='+v.paused);},2000);
     setTimeout(()=>{log(L,'5s 后 video readyState='+v.readyState+' videoWidth='+v.videoWidth+' currentTime='+v.currentTime.toFixed(2)+' paused='+v.paused);},5000);
+  }catch(e){log(L,'出错: '+(e&&e.message?e.message:e));}
+};
+/* 7. v18 根因验证：iPhone 上只调 load() 不调 play()，视频到底拉不拉数据？
+   先只 load() 等 2 秒报数，再调 play() 等 2 秒再报一次——直接验证
+   “必须 play() 才加载”的假说。 */
+$('btnLP').onclick=async()=>{
+  const L=$('logLP'); L.textContent='';
+  try{
+    const v=document.createElement('video');
+    v.muted=true; v.setAttribute('muted',''); v.setAttribute('playsinline',''); v.preload='auto';
+    v.style.cssText='width:100%;background:#000;';
+    document.body.appendChild(v);
+    v.src='clips/seg1-mimi-hello.mp4';
+    v.load(); log(L,'video 已建（可见），设直连 seg1，只调 load()、未调 play()');
+    setTimeout(()=>{log(L,'只 load() 2s 后 readyState='+v.readyState+' videoWidth='+v.videoWidth+' currentTime='+v.currentTime.toFixed(2)+' paused='+v.paused);},2000);
+    setTimeout(()=>{
+      const p=v.play(); log(L,'play() 已调，返回 '+(p?'promise':'undefined'));
+      if(p){p.then(()=>log(L,'play() resolved paused='+v.paused)).catch(e=>log(L,'play() rejected: '+e.message));}
+    },2100);
+    setTimeout(()=>{log(L,'play() 后 2s readyState='+v.readyState+' videoWidth='+v.videoWidth+' currentTime='+v.currentTime.toFixed(2)+' paused='+v.paused);},4200);
+    setTimeout(()=>{log(L,'play() 后 5s readyState='+v.readyState+' videoWidth='+v.videoWidth+' currentTime='+v.currentTime.toFixed(2)+' paused='+v.paused);},7200);
   }catch(e){log(L,'出错: '+(e&&e.message?e.message:e));}
 };
 </script>

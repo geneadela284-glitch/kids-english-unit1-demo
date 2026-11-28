@@ -531,7 +531,7 @@
 /* 构建版本（2026-11-27 第六轮）：每次发版改这个串；诊断角标每行都带它，
    任何一张截图都能证明跑的是哪个版本，旧缓存再也不会悄悄顶替新版。 */
 /* v13（2026-11-28）：回滚 v12，恢复 v11 的声音；除版本号外内容与 v11 字节一致。 */
-const BUILD_VERSION = "v17"; /* 第十七轮：每次发版改这个串，诊断行带版本，截图一眼可辨 */
+const BUILD_VERSION = "v18"; /* 第十八轮：每次发版改这个串，诊断行带版本，截图一眼可辨 */
 const $ = id => document.getElementById(id);
 const caption = $("caption"), capWho = $("capWho"), capLine = $("capLine");
 const turnEl = $("turn"), heardEl = $("heard"), micBtn = $("micBtn"), micNote = $("micNote");
@@ -604,6 +604,24 @@ function waitEvent(el, name, ms) {
     setTimeout(() => fin(false), ms);
   });
 }
+/* v18：iPhone 上只调 load() 不拉视频数据，必须调 play() 才真正开始加载
+   （诊断页 3/4/5/6 全是调了 play() 才报数所以能播；课程页 showSeg 只
+   load 不 play，等 2000ms 不到就放弃，playVid 永远没机会触发加载——死锁）。
+   waitFirstEvent：等多个事件中任一先到；kickLoad：先 play（muted，
+   rejection 静默吞）再等 loadeddata 或 playing，返回 true=有数据。 */
+function waitFirstEvent(el, names, ms) {
+  return new Promise(res => {
+    let done = false;
+    const fin = v => { if (!done) { done = true; res(v); } };
+    names.forEach(n => { el.addEventListener(n, () => fin(true), { once: true }); });
+    setTimeout(() => fin(false), ms);
+  });
+}
+async function kickLoad(v, ms) {
+  try { const p = v.play(); if (p && p.catch) p.catch(() => {}); } catch (e) {}
+  await waitFirstEvent(v, ["loadeddata", "playing"], ms == null ? 3000 : ms);
+  return v.readyState >= 2;
+}
 /* 切段（2026-11-27 第五轮·根治）：旧版只加 .on 做 180ms 淡变，新视频 readyState
    还是 0（刚挂回 src、刚 load）时淡变露出的就是黑底；iOS 上解码跟不上更明显。
    现在切过去之前先等首帧：没数据先 load（有界 2000ms），再拨到目标点等 seeked
@@ -614,7 +632,10 @@ function waitEvent(el, name, ms) {
    换段先淡出（摘 .on，约 150ms），再设 src（blob 优先、无 blob 用直连）、
    load、等首帧（有界 2000ms）、seek 到目标点、加 .on 淡入。
    无帧记 vidFail（粘性，v15 口径），但保持元素可见、让它在后台继续加载，
-   不摘 .on。t 为目标起始秒数（默认 0）。返回单元素。 */
+   不摘 .on。t 为目标起始秒数（默认 0）。返回单元素。
+   切段（v18）：每次设 src/load 后立刻调 kickLoad（先 play 再等
+   loadeddata/playing，有界 3000ms）；兜底重拉后同样先 play 再等，
+   不许只 load 不 play。 */
 async function showSeg(key, t) {
   const v = stageVid;
   const target = (t == null ? 0 : t);
@@ -629,15 +650,14 @@ async function showSeg(key, t) {
   const tryRecover = async () => {
     if (v.src && v.src.indexOf("blob:") === 0 && directURL) {
       try { v.pause(); v.removeAttribute("src"); v.load(); v.src = directURL; v.load(); } catch (e) {}
-      await waitEvent(v, "loadeddata", 2000);
-      if (v.readyState >= 2) return true;
+      if (await kickLoad(v, 3000)) return true;
     }
-    try { v.pause(); v.removeAttribute("src"); v.load(); if (directURL) { v.src = directURL; v.load(); } await waitEvent(v, "loadeddata", 2000); } catch (e) {}
-    return v.readyState >= 2;
+    try { v.pause(); v.removeAttribute("src"); v.load(); if (directURL) { v.src = directURL; v.load(); } } catch (e) {}
+    return await kickLoad(v, 3000);
   };
   /* 同一段连续台词：src 已是本段，不重拉，只确认有帧、拨到目标点 */
   if (stageSegKey === key && v.src) {
-    if (v.readyState < 2) { try { v.load(); } catch (e) {} await waitEvent(v, "loadeddata", 2000); }
+    if (v.readyState < 2) { try { v.load(); } catch (e) {} await kickLoad(v, 3000); }
     if (v.readyState < 2) {
       const ok = await tryRecover();
       if (!ok) {
@@ -662,7 +682,7 @@ async function showSeg(key, t) {
   }
   stageSegKey = key;
   activeVid = v;
-  if (v.readyState < 2) { await waitEvent(v, "loadeddata", 2000); }
+  if (v.readyState < 2) { await kickLoad(v, 3000); }
   if (v.readyState < 2) {
     const ok = await tryRecover();
     if (!ok) {
